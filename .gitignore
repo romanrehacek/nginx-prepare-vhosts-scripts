@@ -1,0 +1,23 @@
+# Ignorovať záložné súbory
+*.bak
+*~
+*.swp
+*.swo
+*.tmp
+
+# Ignorovať testovací výstup
+test_*.txt
+test_*.log
+
+# Ignorovať lokálne konfigurácie
+.env
+.env.local
+local.conf
+
+# Ignorovať IDE súbory
+.vscode/
+.idea/
+*.sublime-*
+
+# Ignorovať Mac súbory
+.DS_Store
