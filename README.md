@@ -1,208 +1,208 @@
 # Vhost Management Scripts
 
-Automatizované scripty pre vytváranie a mazanie virtuálnych hostov (vhosts) na Nginx serveri.
+Automated scripts for creating and removing virtual hosts (vhosts) on an Nginx server.
 
-## 📁 Štruktúra
+## 📁 Structure
 
 ```
 scripts/
-├── prepare_vhost.sh   # Vytvorenie nového vhost
-├── remove_vhost.sh    # Odstránenie existujúceho vhost
-├── template.conf      # Nginx konfiguračná šablóna
-└── README.md         # Táto dokumentácia
+├── prepare_vhost.sh   # Create new vhost
+├── remove_vhost.sh    # Remove existing vhost
+├── template.conf      # Nginx configuration template
+└── README.md         # This documentation
 ```
 
-## 🚀 Inštalácia
+## 🚀 Installation
 
-1. **Nastavte MySQL root prístup** (ak ešte nie je nastavený):
+1. **Set up MySQL root access** (if not already configured):
    ```bash
    sudo nano /root/.my.cnf
    ```
    
-   Obsah súboru:
+   File content:
    ```
    [client]
    user=root
-   password=VaseMySQLHeslo
+   password=YourMySQLPassword
    ```
    
-   Nastavte práva:
+   Set permissions:
    ```bash
    sudo chmod 600 /root/.my.cnf
    ```
 
-2. **Nastavte spustiteľné práva**:
+2. **Set executable permissions**:
    ```bash
    sudo chmod +x /var/www/html/scripts/prepare_vhost.sh
    sudo chmod +x /var/www/html/scripts/remove_vhost.sh
    ```
 
-## 📝 Použitie
+## 📝 Usage
 
-### Vytvorenie nového vhost
+### Creating a new vhost
 
 ```bash
 sudo /var/www/html/scripts/prepare_vhost.sh
 ```
 
-**Priebeh:**
-1. Zadáte názov domény (napr. `mojastranka.sk`)
-2. Odpovediete, či sú DNS záznamy nastavené (`ano`/`nie`)
-   - **ANO** - skontroluje DNS a vytvorí SSL certifikáty
-   - **NIE** - preskočí DNS kontrolu a SSL (pre prípravu pred nasmerovaním DNS)
+**Process:**
+1. Enter domain name (e.g., `mysite.com`)
+2. Answer whether DNS records are set up (`yes`/`no`)
+   - **YES** - checks DNS and creates SSL certificates
+   - **NO** - skips DNS check and SSL (for preparation before DNS pointing)
 
-**Čo script vytvorí:**
-- ✅ SFTP používateľa s náhodným heslom
-- ✅ Adresárovú štruktúru (`/var/www/html/domena.sk/public_html/`)
-- ✅ MySQL databázu a používateľa s náhodným heslom
-- ✅ Nginx konfiguráciu z template
-- ✅ SSL certifikáty (ak sú DNS nastavené)
-- ✅ Súbor s prístupovými údajmi (`/root/vhosts/domena.sk.txt`)
+**What the script creates:**
+- ✅ SFTP user with random password
+- ✅ Directory structure (`/var/www/html/domain.com/public_html/`)
+- ✅ MySQL database and user with random password
+- ✅ Nginx configuration from template
+- ✅ SSL certificates (if DNS is set)
+- ✅ File with access credentials (`/root/vhosts/domain.com.txt`)
 
-### Odstránenie vhost
+### Removing a vhost
 
 ```bash
 sudo /var/www/html/scripts/remove_vhost.sh
 ```
 
-**Priebeh:**
-1. Zadáte názov domény na odstránenie
-2. Potvrdíte zadaním `YES`
+**Process:**
+1. Enter domain name to remove
+2. Confirm by typing `YES`
 
-**Čo script odstráni:**
-- 🗑️ Nginx konfiguráciu
-- 🗑️ SSL certifikáty
-- 🗑️ SFTP používateľa
-- 🗑️ Webroot adresár (všetky súbory!)
-- 🗑️ MySQL databázu a používateľa
-- 🗑️ Nginx logy
-- 📁 Presunie prístupové údaje do archívu (`/root/vhosts/archive/`)
+**What the script removes:**
+- 🗑️ Nginx configuration
+- 🗑️ SSL certificates
+- 🗑️ SFTP user
+- 🗑️ Webroot directory (all files!)
+- 🗑️ MySQL database and user
+- 🗑️ Nginx logs
+- 📁 Moves access credentials to archive (`/root/vhosts/archive/`)
 
-## 📂 Adresárová štruktúra vhost
+## 📂 Vhost directory structure
 
 ```
-/var/www/html/domena.sk/
-├── public_html/          # Webroot (775, chroot pre SFTP)
+/var/www/html/domain.com/
+├── public_html/          # Webroot (775, chroot for SFTP)
 │   └── index.html
-└── logs/                 # Logy (775)
+└── logs/                 # Logs (775)
     ├── access.log
     └── error.log
 ```
 
-## 🔐 Bezpečnosť
+## 🔐 Security
 
-### Prístupové údaje
-- Uložené v `/root/vhosts/` (prístup len root)
-- Práva `600` na súbory
-- Po zmazaní vhost → archív `/root/vhosts/archive/`
+### Access credentials
+- Stored in `/root/vhosts/` (root access only)
+- File permissions `600`
+- After vhost deletion → archive `/root/vhosts/archive/`
 
 ### SFTP
-- Chroot do `/var/www/html/domena.sk/`
-- Skupina `sftponly`
+- Chroot to `/var/www/html/domain.com/`
+- Group `sftponly`
 - Shell `/bin/false`
 
 ### MySQL
-- Samostatná databáza pre každú doménu
-- Samostatný používateľ s právami len na svoju DB
-- Náhodné 16-znakové heslá
+- Separate database for each domain
+- Separate user with privileges only for their DB
+- Random 16-character passwords
 
-## 🔧 Konfigurácia
+## 🔧 Configuration
 
 ### Template.conf
-- Prednastavené pre PHP 8.3
+- Preconfigured for PHP 8.3
 - PrestaShop/WordPress ready
 - Client max body size: 512M
 - FastCGI timeout: 300s
 
-### Customizácia template
-Upravte `template.conf` podľa potreby. Premenná `$domain` sa automaticky nahradí skutočným názvom domény.
+### Template customization
+Edit `template.conf` as needed. The `$domain` variable is automatically replaced with the actual domain name.
 
-## 📊 Príklad výstupu
+## 📊 Example output
 
 ```
 =======================================================
-VHOST: mojastranka.sk
-Vytvorené: 2024-01-15 14:32:05
+VHOST: mysite.com
+Created: 2024-01-15 14:32:05
 =======================================================
 
-DOMÉNA: mojastranka.sk
-  Webroot: /var/www/html/mojastranka.sk/public_html
-  Nginx config: /etc/nginx/conf.d/mojastranka.sk.conf
+DOMAIN: mysite.com
+  Webroot: /var/www/html/mysite.com/public_html
+  Nginx config: /etc/nginx/conf.d/mysite.com.conf
 
-SFTP PRÍSTUP:
-  Používateľ: mojastranka.sk
-  Heslo: xY9zK2pQ8vNm4rA5
-  Chroot adresár: /var/www/html/mojastranka.sk
+SFTP ACCESS:
+  Username: mysite.com
+  Password: xY9zK2pQ8vNm4rA5
+  Chroot directory: /var/www/html/mysite.com
 
-SSL CERTIFIKÁTY:
-  Stav: Vytvorené
-  Príkaz pre obnovenie: certbot renew
+SSL CERTIFICATES:
+  Status: Created
+  Renewal command: certbot renew
 
-MYSQL DATABÁZA:
-  Databáza: mojastranka_sk
-  Používateľ: mojastranka_sk
-  Heslo: aB3cD4eF5gH6iJ7k
+MYSQL DATABASE:
+  Database: mysite_com
+  Username: mysite_com
+  Password: aB3cD4eF5gH6iJ7k
   Host: localhost
 
 =======================================================
 
-💾 Prístupové údaje boli uložené do: /root/vhosts/mojastranka.sk.txt
+💾 Access credentials have been saved to: /root/vhosts/mysite.com.txt
 ```
 
-## 🆘 Riešenie problémov
+## 🆘 Troubleshooting
 
-### DNS nie sú nastavené
-Pri vytváraní zvoľte `nie` a po nastavení DNS spustite:
+### DNS not set up
+When creating, choose `no` and after setting up DNS run:
 ```bash
-sudo certbot --nginx -d mojastranka.sk -d www.mojastranka.sk
+sudo certbot --nginx -d mysite.com -d www.mysite.com
 ```
 
-### Rollback pri chybe
-Ak vytvorenie zlyhá, script automaticky vymaže všetky čiastočne vytvorené komponenty.
+### Rollback on error
+If creation fails, the script automatically removes all partially created components.
 
-### Zobrazenie uložených údajov
+### View saved credentials
 ```bash
-sudo cat /root/vhosts/mojastranka.sk.txt
+sudo cat /root/vhosts/mysite.com.txt
 sudo ls -lh /root/vhosts/archive/
 ```
 
-### Testovanie Nginx konfigurácie
+### Test Nginx configuration
 ```bash
 sudo nginx -t
 ```
 
-## 📋 Požiadavky
+## 📋 Requirements
 
 - Ubuntu/Debian server
 - Nginx
 - PHP-FPM (8.3)
 - MySQL/MariaDB
 - Certbot
-- OpenSSH server s SFTP
+- OpenSSH server with SFTP
 - dig (dnsutils)
 
 ## 🔄 Workflow
 
-### Pre nové domény (pred DNS):
-1. `sudo ./prepare_vhost.sh` → zvoľte `nie`
-2. Nasmerujte DNS na server
-3. `sudo certbot --nginx -d domena.sk -d www.domena.sk`
+### For new domains (before DNS):
+1. `sudo ./prepare_vhost.sh` → choose `no`
+2. Point DNS to server
+3. `sudo certbot --nginx -d domain.com -d www.domain.com`
 
-### Pre existujúce domény (po DNS):
-1. `sudo ./prepare_vhost.sh` → zvoľte `ano`
-2. Hotovo!
+### For existing domains (after DNS):
+1. `sudo ./prepare_vhost.sh` → choose `yes`
+2. Done!
 
-## 📝 Poznámky
+## 📝 Notes
 
-- Názvy domén môžu obsahovať pomlčky a bodky
-- Pre MySQL sa pomlčky a bodky nahradia podčiarknikmi
-- Všetky heslá sú 16-znakové náhodné reťazce (base64)
-- Nginx logy sú v `/var/log/nginx/domena.sk-*.log`
+- Domain names can contain hyphens and dots
+- For MySQL, hyphens and dots are replaced with underscores
+- All passwords are 16-character random strings (base64)
+- Nginx logs are in `/var/log/nginx/domain.com-*.log`
 
-## 🤝 Podpora
+## 🤝 Support
 
-Pri problémoch skontrolujte:
-- `/root/vhosts/domena.sk.txt` - prístupové údaje
-- `/var/log/nginx/error.log` - nginx chyby
+If you encounter issues, check:
+- `/root/vhosts/domain.com.txt` - access credentials
+- `/var/log/nginx/error.log` - nginx errors
 - `sudo nginx -t` - syntax check
-- `sudo systemctl status nginx` - nginx stav
+- `sudo systemctl status nginx` - nginx status
