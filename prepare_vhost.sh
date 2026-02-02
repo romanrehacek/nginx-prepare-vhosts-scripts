@@ -109,7 +109,7 @@ vhost_pass=$(openssl rand -base64 12)
 db_pass=$(openssl rand -base64 12)
 
 # Set webroot path and database name
-webroot="/var/www/html/$vhost_name"
+webroot="/var/www/$vhost_name"
 db_name=$(echo "$vhost_name" | sed 's/\./_/g' | sed 's/-/_/g')
 db_user="$db_name"
 nginx_config="/etc/nginx/conf.d/$vhost_name.conf"
