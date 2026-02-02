@@ -36,7 +36,7 @@ if [ -z "$vhost_name" ]; then
 fi
 
 # Set variables
-webroot="/var/www/html/$vhost_name"
+webroot="/var/www/$vhost_name"
 nginx_config="/etc/nginx/conf.d/$vhost_name.conf"
 db_name=$(echo "$vhost_name" | sed 's/\./_/g' | sed 's/-/_/g')
 db_user="$db_name"
