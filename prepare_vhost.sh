@@ -1,300 +1,156 @@
 #!/bin/bash
+set -Ee -o pipefail
 
-# Detect the directory where this script is located
+usage() { echo "Usage: $0 [--domain DOMAIN] [--skip-ssl]"; }
+batch=false domain_arg= skip_ssl=false domain_seen=false
+while (($#)); do
+  case "$1" in
+    --domain)
+      (($# >= 2)) || { usage >&2; exit 2; }
+      [[ "$domain_seen" == false && -n "$2" && "$2" != -* ]] || { echo "--domain must be specified once with a domain value" >&2; usage >&2; exit 2; }
+      domain_arg=$2; domain_seen=true; batch=true; shift 2 ;;
+    --skip-ssl)
+      [[ "$skip_ssl" == false ]] || { echo "--skip-ssl may be specified only once" >&2; usage >&2; exit 2; }
+      skip_ssl=true; batch=true; shift ;;
+    --help|-h) usage; exit 0 ;;
+    *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+if [[ "$batch" == true && -z "$domain_arg" ]]; then echo "--domain is required in batch mode" >&2; usage >&2; exit 2; fi
+if [[ "$EUID" -ne 0 ]]; then echo "Please run this script as sudo!" >&2; exit 1; fi
+
 script_dir=$(dirname "$(readlink -f "$0")")
-
-# Directory for storing access credentials
-VHOSTS_DIR="/root/vhosts"
-
-# Create directory if it doesn't exist
-if [ ! -d "$VHOSTS_DIR" ]; then
-    mkdir -p "$VHOSTS_DIR"
-    chmod 700 "$VHOSTS_DIR"
+. "$script_dir/vhost_config.sh"
+load_vhost_config "$script_dir/.env"
+NGINX_CONFIG_DIR=/etc/nginx/conf.d
+VHOSTS_DIR=/root/vhosts
+vhost_name=$domain_arg
+if [[ "$batch" == false ]]; then read -r -p "Enter domain name (e.g., domain.com): " vhost_name; fi
+if [[ ! "$vhost_name" =~ ^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?[.])*[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$ || ${#vhost_name} -gt 32 ]]; then
+  echo "Error: domain must be valid and at most 32 characters (used as account/database name)." >&2; exit 1
 fi
 
-# Variables for tracking created components
-user_created=false
-webroot_created=false
-db_created=false
-nginx_config_created=false
-
-# Rollback function (runs remove_vhost.sh)
-rollback() {
-    echo ""
-    echo "======================================================="
-    echo "          ERROR: STARTING ROLLBACK"
-    echo "======================================================="
-    echo "[*] Removing partially created components..."
-    echo ""
-    
-    # Path to remove_vhost.sh
-    remove_script="$script_dir/remove_vhost.sh"
-    
-    # Check if remove_vhost.sh exists
-    if [ ! -f "$remove_script" ]; then
-        echo "[!] WARNING: Script $remove_script not found!"
-        echo "[*] Attempting manual cleanup..."
-        
-        # Manual cleanup as fallback
-        [ -f "$nginx_config" ] && rm -f "$nginx_config" && nginx -t &>/dev/null && systemctl reload nginx &>/dev/null
-        [ "$db_created" = true ] && command -v mysql &> /dev/null && mysql -e "DROP DATABASE IF EXISTS \`$db_name\`; DROP USER IF EXISTS '$db_user'@'localhost'; FLUSH PRIVILEGES;" 2>/dev/null
-        [ -d "$webroot" ] && rm -rf "$webroot"
-        [ "$user_created" = true ] && id "$vhost_name" &>/dev/null && pkill -u "$vhost_name" 2>/dev/null && userdel "$vhost_name" 2>/dev/null
-        rm -f /var/log/nginx/$vhost_name-*.log 2>/dev/null
-        
-        echo "[OK] Manual cleanup completed"
-    else
-        # Run remove_vhost.sh with automatic confirmation
-        "$remove_script" --auto-confirm "$vhost_name"
-    fi
-    
-    echo "======================================================="
-    echo "ROLLBACK COMPLETED - All changes have been reverted"
-    echo "======================================================="
-    exit 1
-}
-
-# Set error handler
-trap rollback ERR
-
-if [ "$EUID" -ne 0 ]; then
-  echo "Please run this script as sudo!"
-  exit 1
+if [[ "$batch" == false ]]; then
+  read -r -p "Have DNS records been set up for domain $vhost_name? (yes/no): " dns_ready
+  case "$dns_ready" in
+    yes|y|ano|a) ;;
+    no|n|nie) skip_ssl=true ;;
+    *) echo "Invalid answer. Enter yes or no." >&2; exit 1 ;;
+  esac
 fi
 
-# Ask for domain name
-read -p "Enter domain name (e.g., domain.com): " vhost_name
-
-# Check if domain name was entered
-if [ -z "$vhost_name" ]; then
-  echo "Error: Domain name cannot be empty!"
-  exit 1
-fi
-
-# Question about DNS setup
-echo ""
-read -p "Have DNS records been set up for domain $vhost_name? (yes/no): " dns_ready
-
-# Variable for tracking whether to check SSL
-skip_ssl=false
-
-if [ "$dns_ready" = "yes" ] || [ "$dns_ready" = "y" ] || [ "$dns_ready" = "ano" ] || [ "$dns_ready" = "a" ]; then
-    # Check if domain points to this server
-    echo "[*] Checking DNS for domain $vhost_name..."
-    server_ip=$(hostname -I | awk '{print $1}')
-    domain_ip=$(dig +short "$vhost_name" | tail -n1)
-
-    if [ -z "$domain_ip" ]; then
-        echo "[!] ERROR: Domain $vhost_name has no DNS record set!"
-        echo "Set DNS A record for domain $vhost_name to IP address $server_ip"
-        exit 1
-    elif [ "$domain_ip" != "$server_ip" ]; then
-        echo "[!] ERROR: Domain $vhost_name points to $domain_ip, but server has IP $server_ip"
-        echo "Set DNS A record correctly and run the script again."
-        exit 1
-    else
-        echo "[OK] DNS is correctly set ($domain_ip)"
-    fi
-elif [ "$dns_ready" = "no" ] || [ "$dns_ready" = "n" ] || [ "$dns_ready" = "nie" ]; then
-    echo "[*] DNS not set - skipping DNS check and SSL certificates"
-    echo "[*] After setting up DNS, run manually: certbot --nginx -d $vhost_name -d www.$vhost_name"
-    skip_ssl=true
-else
-    echo "[!] ERROR: Invalid answer. Enter 'yes' or 'no'"
-    exit 1
-fi
-
-# Automatic password generation (16 characters)
-vhost_pass=$(openssl rand -base64 12)
-db_pass=$(openssl rand -base64 12)
-
-# Set webroot path and database name
-webroot="/var/www/$vhost_name"
-db_name=$(echo "$vhost_name" | sed 's/\./_/g' | sed 's/-/_/g')
-db_user="$db_name"
-nginx_config="/etc/nginx/conf.d/$vhost_name.conf"
-
-echo "--- Preparing environment for: $vhost_name ---"
-
-# 1. Create sftponly group
-if ! getent group sftponly > /dev/null; then
-    groupadd sftponly || { echo "[!] ERROR: Failed to create sftponly group"; rollback; }
-fi
-
-# 2. Create user
-if id "$vhost_name" &>/dev/null; then
-    echo "[!] ERROR: User $vhost_name already exists!"
-    exit 1
-else
-    adduser --shell /bin/false "$vhost_name" --force-badname --disabled-password --gecos "" || { echo "[!] ERROR: Failed to create user"; rollback; }
-    echo "$vhost_name:$vhost_pass" | chpasswd || { echo "[!] ERROR: Failed to set password"; rollback; }
-    echo "[OK] User created."
-    user_created=true
-fi
-
-# 3. Set home directory (webroot)
-usermod -d "$webroot" "$vhost_name" || { echo "[!] ERROR: Failed to set home directory"; rollback; }
-
-# 4. Add user to sftponly group
-adduser "$vhost_name" sftponly || { echo "[!] ERROR: Failed to add user to group"; rollback; }
-
-# Add www-data to group (for web server access)
-usermod -aG sftponly www-data || { echo "[!] ERROR: Failed to add www-data to group"; rollback; }
-
-# 5. Create directory structure
-mkdir -p "$webroot/public_html" || { echo "[!] ERROR: Failed to create public_html"; rollback; }
-mkdir -p "$webroot/logs" || { echo "[!] ERROR: Failed to create logs"; rollback; }
-webroot_created=true
-echo "[OK] Directory structure created"
-
-# 6. Set permissions
-chmod 775 -R "$webroot/public_html" || { echo "[!] ERROR: Failed to set permissions"; rollback; }
-chown -R "$vhost_name:sftponly" "$webroot/public_html" || { echo "[!] ERROR: Failed to set owner"; rollback; }
-chmod g+s "$webroot/public_html/" || { echo "[!] ERROR: Failed to set SGID bit"; rollback; }
-
-chown -R "$vhost_name:sftponly" "$webroot/logs" || { echo "[!] ERROR: Failed to set logs owner"; rollback; }
-chmod 775 -R "$webroot/logs" || { echo "[!] ERROR: Failed to set logs permissions"; rollback; }
-
-chmod 755 "$webroot" || { echo "[!] ERROR: Failed to set webroot permissions"; rollback; }
-chown root:root "$webroot" || { echo "[!] ERROR: Failed to set webroot owner"; rollback; }
-echo "[OK] Permissions set"
-
-# 7. Create MySQL database and user
-echo "[*] Creating MySQL database and user..."
-
-if ! command -v mysql &> /dev/null; then
-    echo "[!] WARNING: MySQL/MariaDB is not installed. Database was not created."
-    db_created=false
-else
-    mysql -e "CREATE DATABASE IF NOT EXISTS \`$db_name\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;" 2>/dev/null
-    if [ $? -eq 0 ]; then
-        mysql -e "CREATE USER IF NOT EXISTS '$db_user'@'localhost' IDENTIFIED BY '$db_pass';" 2>/dev/null || { echo "[!] ERROR: Failed to create MySQL user"; rollback; }
-        mysql -e "GRANT ALL PRIVILEGES ON \`$db_name\`.* TO '$db_user'@'localhost';" 2>/dev/null || { echo "[!] ERROR: Failed to set MySQL privileges"; rollback; }
-        mysql -e "FLUSH PRIVILEGES;" 2>/dev/null
-        echo "[OK] MySQL database and user created"
-        db_created=true
-    else
-        echo "[!] WARNING: Failed to create database. Continuing without database."
-        db_created=false
-    fi
-fi
-
-# 8. Create Nginx configuration from template
-template_file="$script_dir/template.conf"
-nginx_config="/etc/nginx/conf.d/$vhost_name.conf"
-
-if [ ! -f "$template_file" ]; then
-    echo "[!] ERROR: Template $template_file does not exist!"
-    rollback
-fi
-
-echo "[*] Creating Nginx configuration..."
-sed "s/\$domain/$vhost_name/g" "$template_file" > "$nginx_config" || { echo "[!] ERROR: Failed to create Nginx configuration"; rollback; }
-nginx_config_created=true
-echo "[OK] Nginx configuration created: $nginx_config"
-
-# 9. Test Nginx configuration
-echo "[*] Testing Nginx configuration..."
-if ! nginx -t 2>&1; then
-    echo "[!] ERROR: Nginx configuration has errors!"
-    echo "Configuration file: $nginx_config"
-    rollback
-fi
-echo "[OK] Nginx configuration is valid"
-
-# 10. Restart Nginx
-echo "[*] Restarting Nginx..."
-if ! systemctl restart nginx; then
-    echo "[!] ERROR: Failed to restart Nginx!"
-    rollback
-fi
-echo "[OK] Nginx successfully restarted"
-
-# 11. Run Certbot for SSL certificates (only if DNS is set)
-if [ "$skip_ssl" = false ]; then
-    echo "[*] Running Certbot for domain $vhost_name..."
-    if command -v certbot &> /dev/null; then
-        certbot --nginx -d "$vhost_name" -d "www.$vhost_name" --non-interactive --agree-tos --register-unsafely-without-email || {
-            echo "[!] WARNING: Certbot failed. SSL certificates were not created."
-            echo "    You can try manually with: certbot --nginx -d $vhost_name -d www.$vhost_name"
-        }
-    else
-        echo "[!] WARNING: Certbot is not installed. SSL certificates were not created."
-        echo "    Install certbot and run: certbot --nginx -d $vhost_name -d www.$vhost_name"
-    fi
-else
-    echo "[!] SSL certificates were not created (DNS not set)"
-    echo "    After setting up DNS run: certbot --nginx -d $vhost_name -d www.$vhost_name"
-fi
-
-# Disable error handler (everything succeeded)
-trap - ERR
-
-# Prepare output
+webroot="$VHOSTS_BASE_DIR/$vhost_name"
+db_name=${vhost_name//./_}; db_name=${db_name//-/_}; db_user=$db_name
+nginx_config="$NGINX_CONFIG_DIR/$vhost_name.conf"
 output_file="$VHOSTS_DIR/$vhost_name.txt"
-timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+template_file="$script_dir/template.conf"
 
-# Create output file with access credentials
-cat > "$output_file" << EOF
-=======================================================
+# Refuse every detectable collision before creating any resource. Base storage must be mounted.
+[[ -d "$VHOSTS_BASE_DIR" ]] || { echo "Configured domain base directory is missing; mount/create it first: $VHOSTS_BASE_DIR" >&2; exit 1; }
+[[ -d "$NGINX_CONFIG_DIR" ]] || { echo "Nginx config directory does not exist: $NGINX_CONFIG_DIR" >&2; exit 1; }
+[[ -f "$template_file" ]] || { echo "Missing template: $template_file" >&2; exit 1; }
+[[ ! -e "$webroot" && ! -L "$webroot" ]] || { echo "Refusing existing webroot: $webroot" >&2; exit 1; }
+[[ ! -e "$nginx_config" && ! -L "$nginx_config" ]] || { echo "Refusing existing Nginx config: $nginx_config" >&2; exit 1; }
+[[ ! -e "$output_file" && ! -L "$output_file" ]] || { echo "Refusing existing credentials: $output_file" >&2; exit 1; }
+! id "$vhost_name" >/dev/null 2>&1 || { echo "Refusing existing account: $vhost_name" >&2; exit 1; }
+! getent group "$vhost_name" >/dev/null || { echo "Refusing existing group: $vhost_name" >&2; exit 1; }
+[[ ! -e "/home/$vhost_name" && ! -L "/home/$vhost_name" ]] || { echo "Refusing existing account home directory: /home/$vhost_name" >&2; exit 1; }
+getent group sftponly >/dev/null || command -v groupadd >/dev/null || { echo "groupadd is required" >&2; exit 1; }
+for cmd in adduser usermod userdel groupadd groupdel gpasswd chpasswd mysql openssl nginx systemctl sed mktemp ln awk grep; do command -v "$cmd" >/dev/null || { echo "Required command missing: $cmd" >&2; exit 1; }; done
+[[ -d /root ]] || exit 1
+mysql -N -B -e "SELECT COUNT(*) FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='$db_name';" | grep -qx 0 || { echo "Refusing existing database: $db_name (or MySQL query failed)" >&2; exit 1; }
+mysql -N -B -e "SELECT COUNT(*) FROM mysql.user WHERE User='$db_user' AND Host='localhost';" | grep -qx 0 || { echo "Refusing existing database user: $db_user (or MySQL query failed)" >&2; exit 1; }
+if [[ "$skip_ssl" == false ]]; then
+  command -v dig >/dev/null || { echo "dig is required for DNS validation" >&2; exit 1; }
+  command -v certbot >/dev/null || { echo "Certbot is required unless --skip-ssl is used" >&2; exit 1; }
+  cert_listing=$(certbot certificates 2>/dev/null) || { echo "Could not inspect existing Certbot certificates" >&2; exit 1; }
+  if awk -v domain="$vhost_name" '/^[[:space:]]*Domains:[[:space:]]*/ { sub(/^[[:space:]]*Domains:[[:space:]]*/, ""); n=split($0, domains, /[[:space:]]+/); for (i=1; i<=n; i++) if (tolower(domains[i]) == tolower(domain)) found=1 } END { exit !found }' <<< "$cert_listing"; then
+    echo "Refusing existing certificate containing $vhost_name" >&2; exit 1
+  fi
+  server_ip=$(hostname -I | awk '{print $1}'); domain_ip=$(dig +short "$vhost_name" | tail -n1)
+  [[ -n "$domain_ip" && "$domain_ip" == "$server_ip" ]] || { echo "DNS for $vhost_name does not resolve to this server" >&2; exit 1; }
+fi
+nginx -t
+
+user_created=false group_created=false private_group_created=false webroot_created=false db_created=false db_user_created=false config_created=false www_group_added=false credentials_created=false
+tmp_config= tmp_credentials=
+vhost_pass=$(openssl rand -base64 12); db_pass=$(openssl rand -base64 12)
+rollback() {
+  trap - ERR
+  set +e
+  echo "Provisioning failed; cleaning resources created by this invocation." >&2
+  [[ "$config_created" == true ]] && rm -f -- "$nginx_config"
+  [[ -n "$tmp_config" ]] && rm -f -- "$tmp_config"
+  [[ -n "$tmp_credentials" ]] && rm -f -- "$tmp_credentials"
+  if [[ "$db_user_created" == true ]]; then mysql -e "DROP USER '$db_user'@'localhost';"; fi
+  if [[ "$db_created" == true ]]; then mysql -e "DROP DATABASE \`$db_name\`;"; fi
+  [[ "$credentials_created" == true ]] && rm -f -- "$output_file"
+  [[ "$webroot_created" == true ]] && { rmdir "$webroot/public_html" "$webroot/logs" "$webroot" 2>/dev/null || true; }
+  if [[ "$user_created" == true ]] && id "$vhost_name" >/dev/null 2>&1; then
+    # Delete only the account created here; never remove its home recursively.
+    userdel "$vhost_name" 2>/dev/null || true
+  fi
+  [[ "$www_group_added" == true ]] && gpasswd -d www-data sftponly >/dev/null 2>&1
+  [[ "$private_group_created" == true ]] && groupdel "$vhost_name" 2>/dev/null
+  [[ "$group_created" == true ]] && groupdel sftponly 2>/dev/null
+  nginx -t >/dev/null 2>&1 && systemctl reload nginx >/dev/null 2>&1
+  exit 1
+}
+trap rollback ERR
+fail() { echo "ERROR: $*" >&2; rollback; }
+
+if ! getent group sftponly >/dev/null; then groupadd sftponly || fail "Failed to create sftponly group"; group_created=true; fi
+adduser --no-create-home --shell /bin/false "$vhost_name" --force-badname --disabled-password --gecos "Created by prepare_vhost.sh" || fail "Failed to create account"
+user_created=true
+if getent group "$vhost_name" >/dev/null; then private_group_created=true; fi
+echo "$vhost_name:$vhost_pass" | chpasswd || fail "Failed to set account password"
+usermod -d "$webroot" "$vhost_name" || fail "Failed to set account home"
+adduser "$vhost_name" sftponly || fail "Failed to add account to sftponly"
+if ! id -nG www-data | tr ' ' '\n' | grep -qx sftponly; then usermod -aG sftponly www-data || fail "Failed to add www-data to sftponly"; www_group_added=true; fi
+mkdir -- "$webroot" || fail "Could not atomically create webroot"
+webroot_created=true
+mkdir "$webroot/public_html" "$webroot/logs" || fail "Failed to create domain directories"
+chmod 775 "$webroot/public_html" "$webroot/logs" || fail "Failed to set directory permissions"
+chown "$vhost_name:sftponly" "$webroot/public_html" "$webroot/logs" || fail "Failed to set directory ownership"
+chmod g+s "$webroot/public_html" || fail "Failed to set SGID bit"
+chmod 755 "$webroot" && chown root:root "$webroot" || fail "Failed to set webroot ownership"
+
+mysql -e "CREATE DATABASE \`$db_name\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;" || fail "Failed to create database"
+db_created=true
+mysql -e "CREATE USER '$db_user'@'localhost' IDENTIFIED BY '$db_pass';" || fail "Failed to create database user"
+db_user_created=true
+mysql -e "GRANT ALL PRIVILEGES ON \`$db_name\`.* TO '$db_user'@'localhost'; FLUSH PRIVILEGES;" || fail "Failed to grant database privileges"
+
+tmp_config=$(mktemp "$NGINX_CONFIG_DIR/.${vhost_name}.XXXXXX")
+sed -e "s|__DOMAIN__|$vhost_name|g" -e "s|__VHOSTS_BASE_DIR__|$VHOSTS_BASE_DIR|g" -e "s|__PHP_FPM_VERSION__|$PHP_FPM_VERSION|g" "$template_file" > "$tmp_config" || fail "Failed to render Nginx config"
+ln -- "$tmp_config" "$nginx_config" || fail "Could not atomically install Nginx config"
+config_created=true
+rm -f -- "$tmp_config"
+tmp_config=
+nginx -t || fail "Nginx configuration test failed"
+mkdir -p "$VHOSTS_DIR" || fail "Could not create credentials directory"
+chmod 700 "$VHOSTS_DIR" || fail "Could not secure credentials directory"
+tmp_credentials=$(mktemp "$VHOSTS_DIR/.${vhost_name}.XXXXXX")
+cat > "$tmp_credentials" <<EOF
 VHOST: $vhost_name
-Created: $timestamp
-=======================================================
-
 DOMAIN: $vhost_name
-  Webroot: $webroot/public_html
-  Nginx config: $nginx_config
-  Logs: /var/log/nginx/$vhost_name-access.log
-        /var/log/nginx/$vhost_name-error.log
-
-SFTP ACCESS:
-  Username: $vhost_name
-  Password: $vhost_pass
-  Chroot directory: $webroot
-
-SSL CERTIFICATES:
+Webroot: $webroot/public_html
+Nginx config: $nginx_config
+SFTP username: $vhost_name
+SFTP password: $vhost_pass
+Database: $db_name
+Database user: $db_user
+Database password: $db_pass
+Database host: localhost
+SSL: $([[ "$skip_ssl" == true ]] && echo skipped || echo created)
 EOF
-
-if [ "$skip_ssl" = false ]; then
-cat >> "$output_file" << EOF
-  Status: Created (or attempted to create)
-  Renewal command: certbot renew
-
-EOF
-else
-cat >> "$output_file" << EOF
-  Status: NOT CREATED (DNS not set)
-  After setting up DNS run: certbot --nginx -d $vhost_name -d www.$vhost_name
-
-EOF
+chmod 600 "$tmp_credentials" || fail "Could not secure credentials"
+ln -- "$tmp_credentials" "$output_file" || fail "Could not atomically save credentials"
+credentials_created=true
+rm -f "$tmp_credentials"
+tmp_credentials=
+if [[ "$skip_ssl" == false ]]; then
+  certbot --nginx -d "$vhost_name" -d "www.$vhost_name" --non-interactive --agree-tos --register-unsafely-without-email || fail "Certbot failed"
 fi
-
-# Add MySQL credentials if created
-if [ "$db_created" = true ]; then
-cat >> "$output_file" << EOF
-MYSQL DATABASE:
-  Database: $db_name
-  Username: $db_user
-  Password: $db_pass
-  Host: localhost
-
-EOF
-else
-cat >> "$output_file" << EOF
-MYSQL DATABASE:
-  [!] Database was not created (MySQL not available)
-
-EOF
-fi
-
-echo "=======================================================" >> "$output_file"
-
-# Set file permissions
-chmod 600 "$output_file"
-
-# Display output to console
-echo ""
-cat "$output_file"
-echo ""
-echo "💾 Access credentials have been saved to: $output_file"
-echo ""
+trap - ERR
+echo "Vhost $vhost_name created successfully. Credentials: $output_file"
