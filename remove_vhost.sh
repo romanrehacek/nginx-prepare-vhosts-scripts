@@ -1,5 +1,27 @@
 #!/bin/bash
 
+if [ "$EUID" -ne 0 ]; then
+  echo "Please run this script as sudo!"
+  exit 1
+fi
+
+# Detect the directory where this script is located
+script_dir=$(dirname "$(readlink -f "$0")")
+
+# Load trusted parser code; the local .env file itself is only parsed as data.
+config_helper="$script_dir/vhost_config.sh"
+if [ ! -f "$config_helper" ]; then
+    echo "[!] ERROR: Configuration helper $config_helper not found!"
+    exit 1
+fi
+. "$config_helper"
+if ! load_vhost_config "$script_dir/.env"; then
+    exit 1
+fi
+
+# Keep Nginx configs in the existing conf.d directory.
+NGINX_CONFIG_DIR="/etc/nginx/conf.d"
+
 # Directory for access credentials
 VHOSTS_DIR="/root/vhosts"
 ARCHIVE_DIR="$VHOSTS_DIR/archive"
@@ -8,11 +30,6 @@ ARCHIVE_DIR="$VHOSTS_DIR/archive"
 if [ ! -d "$ARCHIVE_DIR" ]; then
     mkdir -p "$ARCHIVE_DIR"
     chmod 700 "$ARCHIVE_DIR"
-fi
-
-if [ "$EUID" -ne 0 ]; then
-  echo "Please run this script as sudo!"
-  exit 1
 fi
 
 # Check for --auto-confirm parameter
@@ -35,9 +52,15 @@ if [ -z "$vhost_name" ]; then
   exit 1
 fi
 
+# The domain is used in file paths, account names, SQL, and Nginx config.
+if [ "${#vhost_name}" -gt 253 ] || [[ ! "$vhost_name" =~ ^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?[.])*[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$ ]]; then
+  echo "Error: Enter a valid domain name (letters, numbers, dots, and interior hyphens only)."
+  exit 1
+fi
+
 # Set variables
-webroot="/var/www/$vhost_name"
-nginx_config="/etc/nginx/conf.d/$vhost_name.conf"
+webroot="$VHOSTS_BASE_DIR/$vhost_name"
+nginx_config="$NGINX_CONFIG_DIR/$vhost_name.conf"
 db_name=$(echo "$vhost_name" | sed 's/\./_/g' | sed 's/-/_/g')
 db_user="$db_name"
 

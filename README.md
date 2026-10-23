@@ -1,208 +1,105 @@
 # Vhost Management Scripts
 
-Automated scripts for creating and removing virtual hosts (vhosts) on an Nginx server.
+Bash scripts for creating and removing Nginx virtual hosts on Ubuntu/Debian servers.
 
-## 📁 Structure
+## Files
 
-```
-scripts/
-├── prepare_vhost.sh   # Create new vhost
-├── remove_vhost.sh    # Remove existing vhost
-├── template.conf      # Nginx configuration template
-└── README.md         # This documentation
-```
+- `prepare_vhost.sh` creates a vhost, SFTP account, MySQL database/user, Nginx config, and (when DNS is ready) SSL certificates.
+- `remove_vhost.sh` removes those resources for a domain.
+- `template.conf` is the Nginx server-block template.
+- `vhost_config.sh` safely reads the local configuration shared by both scripts.
+- `.env.example` documents the supported local settings.
 
-## 🚀 Installation
+Keep these files together in one directory on the server. The Nginx config is created in `/etc/nginx/conf.d/<domain>.conf`.
 
-1. **Set up MySQL root access** (if not already configured):
-   ```bash
-   sudo nano /root/.my.cnf
-   ```
-   
-   File content:
-   ```
-   [client]
-   user=root
-   password=YourMySQLPassword
-   ```
-   
-   Set permissions:
-   ```bash
-   sudo chmod 600 /root/.my.cnf
-   ```
+## Local configuration
 
-2. **Set executable permissions**:
-   ```bash
-   sudo chmod +x /var/www/html/scripts/prepare_vhost.sh
-   sudo chmod +x /var/www/html/scripts/remove_vhost.sh
-   ```
+The scripts look for `.env` in their own directory. If it is absent, they keep the current defaults:
 
-## 📝 Usage
+- PHP-FPM socket version: `8.3`
+- Domain directory base: `/var/www`
 
-### Creating a new vhost
+To set custom values, copy the example and edit it:
 
 ```bash
-sudo /var/www/html/scripts/prepare_vhost.sh
+cp .env.example .env
+chmod 600 .env
+nano .env
 ```
 
-**Process:**
-1. Enter domain name (e.g., `mysite.com`)
-2. Answer whether DNS records are set up (`yes`/`no`)
-   - **YES** - checks DNS and creates SSL certificates
-   - **NO** - skips DNS check and SSL (for preparation before DNS pointing)
+Example for a mounted web volume:
 
-**What the script creates:**
-- ✅ SFTP user with random password
-- ✅ Directory structure (`/var/www/html/domain.com/public_html/`)
-- ✅ MySQL database and user with random password
-- ✅ Nginx configuration from template
-- ✅ SSL certificates (if DNS is set)
-- ✅ File with access credentials (`/root/vhosts/domain.com.txt`)
+```dotenv
+PHP_FPM_VERSION=8.3
+VHOSTS_BASE_DIR=/mnt/web-volume/www
+```
 
-### Removing a vhost
+The base directory is the parent of each domain directory. With the example above, the webroot for `example.com` becomes `/mnt/web-volume/www/example.com/public_html`; logs go to `/mnt/web-volume/www/example.com/logs`.
+
+Use only the two supported `KEY=VALUE` lines. Values must not be quoted and must not contain spaces or inline comments. The loader validates both values and treats the file as data; it never evaluates shell commands. Unknown or malformed settings make the scripts stop before changing the server. `.env` is ignored by Git; commit `.env.example`, never the local `.env`. Do not store passwords or other secrets in it.
+
+The PHP-FPM setting controls the socket rendered into each new Nginx config, for example `/var/run/php/php8.3-fpm.sock`. The Nginx config directory remains `/etc/nginx/conf.d`.
+
+## Install and prepare a vhost
+
+Keep the scripts and template together, then make the entry points executable:
 
 ```bash
-sudo /var/www/html/scripts/remove_vhost.sh
+sudo chmod +x prepare_vhost.sh remove_vhost.sh
+sudo ./prepare_vhost.sh
 ```
 
-**Process:**
-1. Enter domain name to remove
-2. Confirm by typing `YES`
+The script asks for a domain and whether DNS is ready. Choose `no` to create the vhost before pointing DNS; SSL setup is skipped. When DNS points to this server, run Certbot manually or create the vhost with DNS already ready.
 
-**What the script removes:**
-- 🗑️ Nginx configuration
-- 🗑️ SSL certificates
-- 🗑️ SFTP user
-- 🗑️ Webroot directory (all files!)
-- 🗑️ MySQL database and user
-- 🗑️ Nginx logs
-- 📁 Moves access credentials to archive (`/root/vhosts/archive/`)
+The script creates:
 
-## 📂 Vhost directory structure
+- A per-domain SFTP user and directory structure.
+- A MySQL database and user, when MySQL/MariaDB is available.
+- An Nginx config in `/etc/nginx/conf.d`.
+- SSL certificates with Certbot when DNS is ready and Certbot is installed.
+- Access details in `/root/vhosts/<domain>.txt`.
 
-```
-/var/www/html/domain.com/
-├── public_html/          # Webroot (775, chroot for SFTP)
-│   └── index.html
-└── logs/                 # Logs (775)
-    ├── access.log
-    └── error.log
+For each domain, the directory structure is:
+
+```text
+VHOSTS_BASE_DIR/<domain>/
+├── public_html/
+└── logs/
 ```
 
-## 🔐 Security
+For the defaults, this is `/var/www/<domain>/`. The public webroot is `public_html/`.
 
-### Access credentials
-- Stored in `/root/vhosts/` (root access only)
-- File permissions `600`
-- After vhost deletion → archive `/root/vhosts/archive/`
+## WordPress setup and migration
 
-### SFTP
-- Chroot to `/var/www/html/domain.com/`
-- Group `sftponly`
-- Shell `/bin/false`
+1. Create the vhost and database with `prepare_vhost.sh`.
+2. Install a clean WordPress copy into that domain's `public_html/` and complete its initial setup.
+3. Use the credentials saved in `/root/vhosts/<domain>.txt` when configuring the destination site.
+4. Use WP Migrate Pro to move the live site's database and files to the new installation, then verify the site and URLs before switching traffic.
 
-### MySQL
-- Separate database for each domain
-- Separate user with privileges only for their DB
-- Random 16-character passwords
+These scripts provision the server-side vhost and database; they do not install WordPress or perform the content migration.
 
-## 🔧 Configuration
+## Remove a vhost
 
-### Template.conf
-- Preconfigured for PHP 8.3
-- PrestaShop/WordPress ready
-- Client max body size: 512M
-- FastCGI timeout: 300s
-
-### Template customization
-Edit `template.conf` as needed. The `$domain` variable is automatically replaced with the actual domain name.
-
-## 📊 Example output
-
-```
-=======================================================
-VHOST: mysite.com
-Created: 2024-01-15 14:32:05
-=======================================================
-
-DOMAIN: mysite.com
-  Webroot: /var/www/html/mysite.com/public_html
-  Nginx config: /etc/nginx/conf.d/mysite.com.conf
-
-SFTP ACCESS:
-  Username: mysite.com
-  Password: xY9zK2pQ8vNm4rA5
-  Chroot directory: /var/www/html/mysite.com
-
-SSL CERTIFICATES:
-  Status: Created
-  Renewal command: certbot renew
-
-MYSQL DATABASE:
-  Database: mysite_com
-  Username: mysite_com
-  Password: aB3cD4eF5gH6iJ7k
-  Host: localhost
-
-=======================================================
-
-💾 Access credentials have been saved to: /root/vhosts/mysite.com.txt
-```
-
-## 🆘 Troubleshooting
-
-### DNS not set up
-When creating, choose `no` and after setting up DNS run:
 ```bash
-sudo certbot --nginx -d mysite.com -d www.mysite.com
+sudo ./remove_vhost.sh
 ```
 
-### Rollback on error
-If creation fails, the script automatically removes all partially created components.
+The script asks for the domain and requires typing `YES`. It removes the Nginx config, SSL certificate, SFTP user, webroot, database/user, and Nginx logs. Credentials are moved to `/root/vhosts/archive/`.
 
-### View saved credentials
-```bash
-sudo cat /root/vhosts/mysite.com.txt
-sudo ls -lh /root/vhosts/archive/
-```
+**Removing a vhost recursively deletes its entire domain directory, including files stored on a mounted volume.** Back up or move any data you need before confirming removal.
 
-### Test Nginx configuration
+## Requirements and checks
+
+- Ubuntu/Debian
+- Nginx with `/etc/nginx/conf.d` included
+- PHP-FPM matching `PHP_FPM_VERSION`
+- MySQL/MariaDB (optional; database creation is skipped if unavailable)
+- Certbot (optional)
+- OpenSSH server with SFTP
+- `dig` from `dnsutils` when creating a vhost with DNS already set
+
+Check Nginx after changes with:
+
 ```bash
 sudo nginx -t
 ```
-
-## 📋 Requirements
-
-- Ubuntu/Debian server
-- Nginx
-- PHP-FPM (8.3)
-- MySQL/MariaDB
-- Certbot
-- OpenSSH server with SFTP
-- dig (dnsutils)
-
-## 🔄 Workflow
-
-### For new domains (before DNS):
-1. `sudo ./prepare_vhost.sh` → choose `no`
-2. Point DNS to server
-3. `sudo certbot --nginx -d domain.com -d www.domain.com`
-
-### For existing domains (after DNS):
-1. `sudo ./prepare_vhost.sh` → choose `yes`
-2. Done!
-
-## 📝 Notes
-
-- Domain names can contain hyphens and dots
-- For MySQL, hyphens and dots are replaced with underscores
-- All passwords are 16-character random strings (base64)
-- Nginx logs are in `/var/log/nginx/domain.com-*.log`
-
-## 🤝 Support
-
-If you encounter issues, check:
-- `/root/vhosts/domain.com.txt` - access credentials
-- `/var/log/nginx/error.log` - nginx errors
-- `sudo nginx -t` - syntax check
-- `sudo systemctl status nginx` - nginx status

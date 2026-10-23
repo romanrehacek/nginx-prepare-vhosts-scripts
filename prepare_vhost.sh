@@ -1,7 +1,26 @@
 #!/bin/bash
 
+if [ "$EUID" -ne 0 ]; then
+  echo "Please run this script as sudo!"
+  exit 1
+fi
+
 # Detect the directory where this script is located
 script_dir=$(dirname "$(readlink -f "$0")")
+
+# Load trusted parser code; the local .env file itself is only parsed as data.
+config_helper="$script_dir/vhost_config.sh"
+if [ ! -f "$config_helper" ]; then
+    echo "[!] ERROR: Configuration helper $config_helper not found!"
+    exit 1
+fi
+. "$config_helper"
+if ! load_vhost_config "$script_dir/.env"; then
+    exit 1
+fi
+
+# Keep Nginx configs in the existing conf.d directory.
+NGINX_CONFIG_DIR="/etc/nginx/conf.d"
 
 # Directory for storing access credentials
 VHOSTS_DIR="/root/vhosts"
@@ -57,17 +76,18 @@ rollback() {
 # Set error handler
 trap rollback ERR
 
-if [ "$EUID" -ne 0 ]; then
-  echo "Please run this script as sudo!"
-  exit 1
-fi
-
 # Ask for domain name
 read -p "Enter domain name (e.g., domain.com): " vhost_name
 
 # Check if domain name was entered
 if [ -z "$vhost_name" ]; then
   echo "Error: Domain name cannot be empty!"
+  exit 1
+fi
+
+# The domain is used in file paths, account names, SQL, and Nginx config.
+if [ "${#vhost_name}" -gt 253 ] || [[ ! "$vhost_name" =~ ^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?[.])*[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$ ]]; then
+  echo "Error: Enter a valid domain name (letters, numbers, dots, and interior hyphens only)."
   exit 1
 fi
 
@@ -109,10 +129,10 @@ vhost_pass=$(openssl rand -base64 12)
 db_pass=$(openssl rand -base64 12)
 
 # Set webroot path and database name
-webroot="/var/www/$vhost_name"
+webroot="$VHOSTS_BASE_DIR/$vhost_name"
 db_name=$(echo "$vhost_name" | sed 's/\./_/g' | sed 's/-/_/g')
 db_user="$db_name"
-nginx_config="/etc/nginx/conf.d/$vhost_name.conf"
+nginx_config="$NGINX_CONFIG_DIR/$vhost_name.conf"
 
 echo "--- Preparing environment for: $vhost_name ---"
 
@@ -181,7 +201,7 @@ fi
 
 # 8. Create Nginx configuration from template
 template_file="$script_dir/template.conf"
-nginx_config="/etc/nginx/conf.d/$vhost_name.conf"
+nginx_config="$NGINX_CONFIG_DIR/$vhost_name.conf"
 
 if [ ! -f "$template_file" ]; then
     echo "[!] ERROR: Template $template_file does not exist!"
@@ -189,7 +209,11 @@ if [ ! -f "$template_file" ]; then
 fi
 
 echo "[*] Creating Nginx configuration..."
-sed "s/\$domain/$vhost_name/g" "$template_file" > "$nginx_config" || { echo "[!] ERROR: Failed to create Nginx configuration"; rollback; }
+sed \
+    -e "s|__DOMAIN__|$vhost_name|g" \
+    -e "s|__VHOSTS_BASE_DIR__|$VHOSTS_BASE_DIR|g" \
+    -e "s|__PHP_FPM_VERSION__|$PHP_FPM_VERSION|g" \
+    "$template_file" > "$nginx_config" || { echo "[!] ERROR: Failed to create Nginx configuration"; rollback; }
 nginx_config_created=true
 echo "[OK] Nginx configuration created: $nginx_config"
 
