@@ -49,14 +49,32 @@ sudo chmod +x prepare_vhost.sh remove_vhost.sh
 sudo ./prepare_vhost.sh
 ```
 
-The script asks for a domain and whether DNS is ready. Choose `no` to create the vhost before pointing DNS; SSL setup is skipped. When DNS points to this server, run Certbot manually or create the vhost with DNS already ready.
+With no options, the script asks for a domain and whether DNS is ready. For automated provisioning, pass `--domain`; batch mode never prompts. DNS must point to this server and Certbot must succeed unless `--skip-ssl` is passed. `--skip-ssl` skips both DNS checks and Certbot.
+
+```bash
+sudo ./prepare_vhost.sh --domain example.com --skip-ssl
+```
+
+For a list of domains (one per line, blank lines and `#` comments ignored), explicitly stop at the first failure:
+
+```bash
+while IFS= read -r domain || [ -n "$domain" ]; do
+  case "$domain" in ''|\#*) continue ;; esac
+  if ! sudo ./prepare_vhost.sh --domain "$domain" --skip-ssl; then
+    echo "Provisioning failed for $domain; stopping." >&2
+    exit 1
+  fi
+done < domains.txt
+```
+
+Before running, ensure the configured `VHOSTS_BASE_DIR` already exists and its volume is mounted. The script refuses existing webroots, Nginx configs, credentials, accounts, groups, databases, database users, or a Certbot certificate already containing the domain; rerunning for a provisioned domain exits with an error. Any provisioning failure exits nonzero and attempts cleanup only for resources created by that invocation. Certbot can leave certificate or renewal residue if it fails partway through; the script deliberately does not automatically delete Certbot lineages during rollback, so inspect Certbot state before retrying after an SSL failure.
 
 The script creates:
 
 - A per-domain SFTP user and directory structure.
-- A MySQL database and user, when MySQL/MariaDB is available.
+- A MySQL database and user (MySQL/MariaDB is required; database failures stop provisioning).
 - An Nginx config in `/etc/nginx/conf.d`.
-- SSL certificates with Certbot when DNS is ready and Certbot is installed.
+- SSL certificates with Certbot when DNS is ready, unless `--skip-ssl` is used.
 - Access details in `/root/vhosts/<domain>.txt`.
 
 For each domain, the directory structure is:
@@ -93,8 +111,8 @@ The script asks for the domain and requires typing `YES`. It removes the Nginx c
 - Ubuntu/Debian
 - Nginx with `/etc/nginx/conf.d` included
 - PHP-FPM matching `PHP_FPM_VERSION`
-- MySQL/MariaDB (optional; database creation is skipped if unavailable)
-- Certbot (optional)
+- MySQL/MariaDB (required)
+- Certbot and `dig` (required unless using `--skip-ssl`)
 - OpenSSH server with SFTP
 - `dig` from `dnsutils` when creating a vhost with DNS already set
 
