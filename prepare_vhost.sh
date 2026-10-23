@@ -47,6 +47,15 @@ template_file="$script_dir/template.conf"
 
 # Refuse every detectable collision before creating any resource. Base storage must be mounted.
 [[ -d "$VHOSTS_BASE_DIR" ]] || { echo "Configured domain base directory is missing; mount/create it first: $VHOSTS_BASE_DIR" >&2; exit 1; }
+# Preserve the default /var/www behavior; custom domain bases are expected under a mounted volume.
+if [[ "$VHOSTS_BASE_DIR" != "/var/www" ]]; then
+  volume_mountpoint=$(dirname "$VHOSTS_BASE_DIR")
+  command -v mountpoint >/dev/null || { echo "mountpoint is required to verify the configured volume" >&2; exit 1; }
+  mountpoint -q "$volume_mountpoint" || {
+    echo "[!] ERROR: Volume is not mounted: $volume_mountpoint" >&2
+    exit 1
+  }
+fi
 [[ -d "$NGINX_CONFIG_DIR" ]] || { echo "Nginx config directory does not exist: $NGINX_CONFIG_DIR" >&2; exit 1; }
 [[ -f "$template_file" ]] || { echo "Missing template: $template_file" >&2; exit 1; }
 [[ ! -e "$webroot" && ! -L "$webroot" ]] || { echo "Refusing existing webroot: $webroot" >&2; exit 1; }

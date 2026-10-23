@@ -67,7 +67,7 @@ while IFS= read -r domain || [ -n "$domain" ]; do
 done < domains.txt
 ```
 
-Before running, ensure the configured `VHOSTS_BASE_DIR` already exists and its volume is mounted. The script refuses existing webroots, Nginx configs, credentials, accounts, groups, databases, database users, or a Certbot certificate already containing the domain; rerunning for a provisioned domain exits with an error. Any provisioning failure exits nonzero and attempts cleanup only for resources created by that invocation. Certbot can leave certificate or renewal residue if it fails partway through; the script deliberately does not automatically delete Certbot lineages during rollback, so inspect Certbot state before retrying after an SSL failure.
+Before running, ensure the configured `VHOSTS_BASE_DIR` already exists. For the default `/var/www`, no mount check is required. For a custom base directory, its parent must be a mount point; the script checks this before creating accounts, databases, or directories. The script refuses existing webroots, Nginx configs, credentials, accounts, groups, databases, database users, or a Certbot certificate already containing the domain; rerunning for a provisioned domain exits with an error. Any provisioning failure exits nonzero and attempts cleanup only for resources created by that invocation. Certbot can leave certificate or renewal residue if it fails partway through; the script deliberately does not automatically delete Certbot lineages during rollback, so inspect Certbot state before retrying after an SSL failure.
 
 The script creates:
 
