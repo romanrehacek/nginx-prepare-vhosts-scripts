@@ -109,7 +109,7 @@ sudo ./remove_vhost.sh
 sudo ./remove_vhost.sh --domain example.com
 ```
 
-The script asks for the domain and requires typing `YES` after its read-only checks. Optional `--name IDENTIFIER` is only an assertion against the recorded identifier. It removes the mapped Nginx config, any SSL lineage created by this script, SFTP user and its verified private group, webroot, database/user, and Nginx logs. Credentials are moved to `/root/vhosts/archive/`. It refuses missing or corrupt mapping data, symlinked or mismatched targets, configs without the matching ownership marker, and shared certificate lineages. Shared SFTP group membership is left intact.
+The script asks for the domain and requires typing `YES` after its read-only checks. Optional `--name IDENTIFIER` is only an assertion against the recorded identifier. It removes the mapped Nginx config, any SSL lineage created by this script, SFTP user and its verified private group, webroot, database/user, and Nginx logs. Credentials are moved to `/root/vhosts/archive/`. It refuses missing or corrupt mapping data, symlinked or mismatched targets, mounted filesystems inside the domain directory, configs without the matching ownership marker, and shared certificate lineages. Shared SFTP group membership is left intact.
 
 **Removing a vhost recursively deletes its entire domain directory, including files stored on a mounted volume.** Back up or move any data you need before confirming removal.
 
