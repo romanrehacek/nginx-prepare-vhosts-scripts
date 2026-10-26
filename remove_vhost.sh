@@ -38,6 +38,15 @@ archive_timestamp=$(date '+%Y%m%d_%H%M%S')
 archive_file="$ARCHIVE_DIR/${domain}_${archive_timestamp}.txt"
 [[ -d "$NGINX_CONFIG_DIR" ]] || { echo "Missing Nginx config directory: $NGINX_CONFIG_DIR" >&2; exit 1; }
 check_vhost_mount "$mapped_base" || exit 1
+command -v findmnt >/dev/null || { echo "findmnt is required to verify that the domain directory contains no nested mounts." >&2; exit 1; }
+while IFS= read -r mounted_target; do
+  case "$mounted_target" in
+    "$webroot"|"$webroot"/*)
+      echo "Refusing to remove a domain directory containing a mounted filesystem: $mounted_target" >&2
+      exit 1
+      ;;
+  esac
+done < <(findmnt -rn -o TARGET)
 if [[ -L "$webroot" ]]; then echo "Refusing symlink webroot: $webroot" >&2; exit 1; fi
 if [[ -e "$webroot" ]]; then
   [[ -d "$webroot" && "$(stat -c '%u' "$webroot")" == 0 ]] || { echo "Refusing webroot that is not a root-owned directory: $webroot" >&2; exit 1; }
