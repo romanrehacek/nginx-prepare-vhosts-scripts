@@ -20,8 +20,8 @@ valid_vhost_domain() {
 }
 
 certbot_lineage_conflicts() {
-  local listing="$1" wanted="$2"
-  awk -v wanted="$wanted" '
+  local listing="$1" wanted="$2" include_www="$3"
+  awk -v wanted="$wanted" -v include_www="$include_www" '
     /^[[:space:]]*Certificate Name:/ {
       name=$0; sub(/^[[:space:]]*Certificate Name:[[:space:]]*/, "", name)
       if (tolower(name) == tolower(wanted)) collision=1
@@ -30,7 +30,7 @@ certbot_lineage_conflicts() {
     /^[[:space:]]*Domains:/ {
       sub(/^[[:space:]]*Domains:[[:space:]]*/, "")
       n=split($0, domains, /[[:space:]]+/)
-      for (i=1; i<=n; i++) if (tolower(domains[i]) == tolower(wanted) || tolower(domains[i]) == "www." tolower(wanted)) collision=1
+      for (i=1; i<=n; i++) if (tolower(domains[i]) == tolower(wanted) || (include_www == "true" && tolower(domains[i]) == "www." tolower(wanted))) collision=1
     }
     END { exit !collision }
   ' <<< "$listing"
@@ -47,6 +47,22 @@ certbot_domains_for_lineage() {
   ' <<< "$listing"
 }
 
+certbot_domains_match_lineage() {
+  local listing="$1" lineage="$2" domain="$3" include_www="$4" domains token
+  local domain_count=0 www_count=0
+  domains=$(certbot_domains_for_lineage "$listing" "$lineage") || return 1
+  [[ -n "$domains" ]] || return 1
+  for token in $domains; do
+    case "$(lowercase "$token")" in
+      "$(lowercase "$domain")") domain_count=$((domain_count + 1));;
+      "www.$(lowercase "$domain")") www_count=$((www_count + 1));;
+      *) return 1;;
+    esac
+  done
+  [[ "$domain_count" -eq 1 ]] || return 1
+  if [[ "$include_www" == true ]]; then [[ "$www_count" -eq 1 ]]; else [[ "$www_count" -eq 0 ]]; fi
+}
+
 private_group_is_owned_by_user() {
   local username="$1" primary_gid="$2" group_record="$3" passwd_file="${4:-/etc/passwd}"
   local group_name group_pass group_gid members member other_primary
@@ -56,6 +72,43 @@ private_group_is_owned_by_user() {
   [[ -z "$other_primary" ]] || return 1
   IFS=, read -r -a group_members <<< "$members"
   for member in "${group_members[@]}"; do [[ -z "$member" || "$member" == "$username" ]] || return 1; done
+}
+
+likely_apex_domain() {
+  [[ "$1" == *.* && "$1" != *.*.* ]]
+}
+
+select_www_alias() {
+  local domain="$1" override="$2" interactive="$3" answer
+  case "$override" in
+    www) include_www=true; return 0 ;;
+    no-www) include_www=false; return 0 ;;
+  esac
+  if ! likely_apex_domain "$domain"; then include_www=false; return 0; fi
+  if [[ "$interactive" != true ]]; then include_www=true; return 0; fi
+  while :; do
+    read -r -p "Include www.$domain as an alias? [Y/n] " answer || { echo "Vhost preparation cancelled."; return 1; }
+    case "$answer" in ''|Y|y) include_www=true; return 0;; N|n) include_www=false; return 0;; *) echo "Enter Y or N." >&2;; esac
+  done
+}
+
+set_requested_vhost_names() {
+  local domain="$1" include_www="$2"
+  requested_dns_names=("$domain")
+  certbot_domain_args=(-d "$domain")
+  if [[ "$include_www" == true ]]; then
+    requested_dns_names+=("www.$domain")
+    certbot_domain_args+=(-d "www.$domain")
+  fi
+}
+
+check_vhost_dns() {
+  local server_ip="$1" hostname resolved_ip
+  shift
+  for hostname in "$@"; do
+    resolved_ip=$(dig +short "$hostname" | tail -n1)
+    [[ -n "$resolved_ip" && "$resolved_ip" == "$server_ip" ]] || { echo "DNS for $hostname does not resolve to this server" >&2; return 1; }
+  done
 }
 
 valid_vhost_base_dir() {
@@ -81,7 +134,7 @@ require_confirmation_mode() {
 }
 
 confirm_provisioning() {
-  local domain="$1" name="$2" explicit_name="$3" skip_ssl="$4" base="$5" answer rerun
+  local domain="$1" name="$2" explicit_name="$3" skip_ssl="$4" base="$5" include_www="$6" answer rerun
   echo "VHOST CONFIGURATION"
   echo "  Domain: $domain"
   echo "  Name: $name"
@@ -90,9 +143,11 @@ confirm_provisioning() {
   echo "  Database user: $name"
   echo "  Webroot: $base/$domain/public_html"
   echo "  SSL: $([[ "$skip_ssl" == true ]] && echo skipped || echo requested)"
+  echo "  WWW alias: $([[ "$include_www" == true ]] && echo "www.$domain included" || echo "not included")"
   if [[ "$explicit_name" == false ]]; then
     rerun="sudo ./prepare_vhost.sh --domain '$domain' --name '$name'"
     [[ "$skip_ssl" == true ]] && rerun+=" --skip-ssl"
+    [[ "$include_www" == true ]] && rerun+=" --www" || rerun+=" --no-www"
     rerun+=" --yes"
     echo "  Identifier is derived. To choose a different name, use --name IDENTIFIER."
     echo "  Rerun command: $rerun"
@@ -132,11 +187,14 @@ validate_name_map() {
 }
 
 validate_name_map_contents() {
-  local file="$1" domain domain_lc name db cert base ssl extra seen_domains='|' seen_names='|'
-  while IFS=$'\t' read -r domain name db cert base ssl extra || [[ -n "$domain$name$db$cert$base$ssl$extra" ]]; do
+  local file="$1" domain domain_lc name db cert base ssl include_www extra seen_domains='|' seen_names='|'
+  while IFS=$'\t' read -r domain name db cert base ssl include_www extra || [[ -n "$domain$name$db$cert$base$ssl$include_www$extra" ]]; do
     [[ -n "$domain" && -z "$extra" && "$domain" =~ ^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?[.])*[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$ && ${#domain} -le 253 ]] || { echo "[!] ERROR: Corrupt name mapping: $file" >&2; return 1; }
     valid_vhost_name "$name" && [[ "$db" == "$name" ]] && valid_vhost_base_dir "$base" || { echo "[!] ERROR: Corrupt name mapping: $file" >&2; return 1; }
+    # Six-column mappings predate the www choice and retain the old domain+www behavior.
+    [[ -n "$include_www" ]] || include_www=true
     [[ ("$ssl" == true && "$cert" == "$domain") || ("$ssl" == false && "$cert" == -) ]] || { echo "[!] ERROR: Corrupt name mapping: $file" >&2; return 1; }
+    [[ "$include_www" == true || "$include_www" == false ]] || { echo "[!] ERROR: Corrupt name mapping: $file" >&2; return 1; }
     domain_lc=$(lowercase "$domain")
     [[ "$seen_domains" != *"|$domain_lc|"* && "$seen_names" != *"|$name|"* ]] || { echo "[!] ERROR: Duplicate domain or identifier in name mapping: $file" >&2; return 1; }
     seen_domains+="$domain_lc|"
@@ -145,22 +203,35 @@ validate_name_map_contents() {
 }
 
 mapped_name_for_domain() {
-  local domain="$1" domain_lc file="$2" d n db cert base ssl
+  local domain="$1" domain_lc file="$2" d n db cert base ssl include_www
   domain_lc=$(lowercase "$domain")
-  while IFS=$'\t' read -r d n db cert base ssl; do
+  while IFS=$'\t' read -r d n db cert base ssl include_www; do
     if [[ "$(lowercase "$d")" == "$domain_lc" ]]; then printf '%s' "$n"; return 0; fi
   done < "$file"
   return 1
 }
 
+mapped_www_for_domain() {
+  local domain="$1" domain_lc file="$2" d n db cert base ssl include_www
+  domain_lc=$(lowercase "$domain")
+  while IFS=$'\t' read -r d n db cert base ssl include_www; do
+    if [[ "$(lowercase "$d")" == "$domain_lc" ]]; then
+      [[ -n "$include_www" ]] || include_www=true
+      printf '%s' "$include_www"
+      return 0
+    fi
+  done < "$file"
+  return 1
+}
+
 map_contains_name() {
-  local name="$1" file="$2" d n db cert base ssl
-  while IFS=$'\t' read -r d n db cert base ssl; do [[ "$n" == "$name" ]] && return 0; done < "$file"
+  local name="$1" file="$2" d n db cert base ssl include_www
+  while IFS=$'\t' read -r d n db cert base ssl include_www; do [[ "$n" == "$name" ]] && return 0; done < "$file"
   return 1
 }
 
 write_name_mapping() {
-  local domain="$1" name="$2" db="$3" cert="$4" base="$5" ssl="$6" file="$7" tmp
+  local domain="$1" name="$2" db="$3" cert="$4" base="$5" ssl="$6" include_www="$7" file="$8" tmp
   mkdir -p "$(dirname "$file")" || return 1
   if [[ -e "$file" || -L "$file" ]]; then
     validate_name_map "$file" || return 1
@@ -168,7 +239,7 @@ write_name_mapping() {
   fi
   tmp=$(mktemp "$(dirname "$file")/.vhost-name-map.XXXXXX") || return 1
   if [[ -f "$file" ]]; then cat "$file" > "$tmp" || { rm -f "$tmp"; return 1; }; fi
-  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$domain" "$name" "$db" "$cert" "$base" "$ssl" >> "$tmp" || { rm -f "$tmp"; return 1; }
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$domain" "$name" "$db" "$cert" "$base" "$ssl" "$include_www" >> "$tmp" || { rm -f "$tmp"; return 1; }
   chown 0:0 "$tmp" && chmod 600 "$tmp" && mv -f "$tmp" "$file" || { rm -f "$tmp"; return 1; }
 }
 
