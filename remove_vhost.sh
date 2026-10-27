@@ -1,7 +1,28 @@
 #!/bin/bash
 set -Eeuo pipefail
 
-usage() { echo "Usage: $0 [--domain DOMAIN] [--name IDENTIFIER]"; }
+usage() {
+  cat <<EOF
+Usage: $0 [--domain DOMAIN] [--name IDENTIFIER]
+
+Remove a vhost created by prepare_vhost.sh. The protected mapping identifies
+its system account, database, certificate and webroot; unmapped legacy vhosts
+are refused.
+
+Options:
+  --domain DOMAIN     Select the full domain instead of being prompted
+  --name IDENTIFIER   Optional assertion; must match the stored identifier
+  -h, --help          Show this help and examples
+
+The script previews the mapped resources and asks you to type YES before
+removing them. Credentials are archived. The mapped webroot is deleted.
+
+Examples:
+  sudo $0
+  sudo $0 --domain example.com
+  sudo $0 --domain shop.example.com --name shop_account
+EOF
+}
 domain= name_assert= name_seen=false
 while (($#)); do
   case "$1" in
