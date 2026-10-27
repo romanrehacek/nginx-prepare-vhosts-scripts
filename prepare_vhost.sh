@@ -1,7 +1,34 @@
 #!/bin/bash
 set -Ee -o pipefail
 
-usage() { echo "Usage: $0 [--domain DOMAIN] [--name IDENTIFIER] [--skip-ssl] [--www|--no-www] [--yes]"; }
+usage() {
+  cat <<EOF
+Usage: $0 [OPTIONS]
+
+Create a vhost using prompts, or pass --domain for scripted use.
+
+Options:
+  --domain DOMAIN     Full DNS hostname; also determines webroot and Nginx file
+  --name IDENTIFIER   Linux user, private group, database and DB user name
+  --www               Include www.DOMAIN (overrides the automatic choice)
+  --no-www            Do not include www.DOMAIN
+  --skip-ssl          Skip DNS checks and Certbot; create an HTTP vhost
+  --yes               Skip final confirmation (requires --domain when non-interactive)
+  -h, --help          Show this help and examples
+
+Without --domain, the script asks for the domain. For a likely root domain
+(two labels, e.g. example.com), it asks whether to include www; subdomains
+omit www by default. It then asks whether DNS is ready unless --skip-ssl is set.
+After preflight checks, review the configuration and press Enter or Y to create,
+or N to cancel. Non-interactive runs require --domain and --yes.
+
+Examples:
+  sudo $0
+  sudo $0 --domain beta.example.com --name example_site --no-www
+  sudo $0 --domain example.com --www
+  sudo $0 --domain shop.example.com --no-www --skip-ssl --yes
+EOF
+}
 batch=false domain_arg= name_arg= skip_ssl=false yes=false domain_seen=false name_seen=false www_mode=auto www_seen=false
 while (($#)); do
   case "$1" in
