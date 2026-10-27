@@ -1,7 +1,28 @@
 #!/bin/bash
 set -Eeuo pipefail
 
-usage() { echo "Usage: $0 [--domain DOMAIN] [--name IDENTIFIER]"; }
+usage() {
+  cat <<EOF
+Usage: $0 [--domain DOMAIN] [--name IDENTIFIER]
+
+Remove a vhost created by prepare_vhost.sh. The protected mapping identifies
+its system account, database, certificate and webroot; unmapped legacy vhosts
+are refused.
+
+Options:
+  --domain DOMAIN     Select the full domain instead of being prompted
+  --name IDENTIFIER   Optional assertion; must match the stored identifier
+  -h, --help          Show this help and examples
+
+The script previews the mapped resources and asks you to type YES before
+removing them. Credentials are archived. The mapped webroot is deleted.
+
+Examples:
+  sudo $0
+  sudo $0 --domain example.com
+  sudo $0 --domain shop.example.com --name shop_account
+EOF
+}
 domain= name_assert= name_seen=false
 while (($#)); do
   case "$1" in
@@ -23,10 +44,11 @@ valid_vhost_domain "$domain" || { echo "Error: enter a valid DNS hostname." >&2;
 validate_name_map "$VHOST_NAME_MAP" || exit 1
 vhost_name=$(mapped_name_for_domain "$domain" "$VHOST_NAME_MAP") || { echo "[!] ERROR: No provisioned identifier mapping exists for $domain; refusing legacy/unmapped removal." >&2; exit 1; }
 assert_mapped_name "$vhost_name" "$name_assert" "$name_seen" || exit 1
-db_name= cert_name= ssl_created= mapped_domain= mapped_db= mapped_base=
-while IFS=$'\t' read -r mapped_domain mapped_name mapped_db cert_name mapped_base ssl_created; do
+db_name= cert_name= ssl_created= mapped_include_www= mapped_domain= mapped_db= mapped_base=
+while IFS=$'\t' read -r mapped_domain mapped_name mapped_db cert_name mapped_base ssl_created mapped_include_www; do
   [[ "$(lowercase "$mapped_domain")" == "$(lowercase "$domain")" ]] && { domain=$mapped_domain; db_name=$mapped_db; break; }
 done < "$VHOST_NAME_MAP"
+[[ -n "$mapped_include_www" ]] || mapped_include_www=true
 [[ -n "$db_name" ]] && valid_vhost_base_dir "$mapped_base" || { echo "[!] ERROR: Mapping does not match expected resource names or paths." >&2; exit 1; }
 NGINX_CONFIG_DIR=/etc/nginx/conf.d
 VHOSTS_DIR=/root/vhosts
@@ -77,10 +99,7 @@ if [[ "$ssl_created" == true && ( -d "/etc/letsencrypt/live/$cert_name" || -d "/
   command -v certbot >/dev/null || { echo "Certbot is needed to safely inspect and remove this certificate." >&2; exit 1; }
   cert_listing=$(certbot certificates 2>/dev/null) || { echo "Could not inspect Certbot certificates." >&2; exit 1; }
   cert_domains=$(certbot_domains_for_lineage "$cert_listing" "$cert_name")
-  [[ -n "$cert_domains" ]] || { echo "Could not verify certificate lineage $cert_name." >&2; exit 1; }
-  for cert_domain in $cert_domains; do
-    [[ "$(lowercase "$cert_domain")" == "$(lowercase "$domain")" || "$(lowercase "$cert_domain")" == "www.$(lowercase "$domain")" ]] || { echo "Certificate $cert_name also contains $cert_domain; refusing to remove shared lineage." >&2; exit 1; }
-  done
+  [[ -n "$cert_domains" ]] && certbot_domains_match_lineage "$cert_listing" "$cert_name" "$domain" "$mapped_include_www" || { echo "Certificate $cert_name does not match the exact mapped domain set; refusing removal." >&2; exit 1; }
 fi
 # Validate DB identifiers against the exact mapping. Queries are read-only.
 command -v mysql >/dev/null || { echo "MySQL client is required to safely verify mapped database resources." >&2; exit 1; }
@@ -99,6 +118,7 @@ About to remove provisioned vhost:
   Database/user: $db_name
   Certificate lineage: $cert_name
   SSL created by this script: $ssl_created
+  WWW alias: $([[ "$mapped_include_www" == true ]] && echo "www.$domain included" || echo "not included")
   Credentials: $credentials_file (will be archived)
 EOF
 while :; do

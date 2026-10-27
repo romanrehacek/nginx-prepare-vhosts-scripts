@@ -1,13 +1,43 @@
 #!/bin/bash
 set -Ee -o pipefail
 
-usage() { echo "Usage: $0 [--domain DOMAIN] [--name IDENTIFIER] [--skip-ssl] [--yes]"; }
-batch=false domain_arg= name_arg= skip_ssl=false yes=false domain_seen=false name_seen=false
+usage() {
+  cat <<EOF
+Usage: $0 [OPTIONS]
+
+Create a vhost using prompts, or pass --domain for scripted use.
+
+Options:
+  --domain DOMAIN     Full DNS hostname; also determines webroot and Nginx file
+  --name IDENTIFIER   Linux user, private group, database and DB user name
+  --www               Include www.DOMAIN (overrides the automatic choice)
+  --no-www            Do not include www.DOMAIN
+  --skip-ssl          Skip DNS checks and Certbot; create an HTTP vhost
+  --yes               Skip final confirmation (requires --domain when non-interactive)
+  -h, --help          Show this help and examples
+
+Without --domain, the script asks for the domain. For a likely root domain
+(two labels, e.g. example.com), it asks whether to include www; subdomains
+omit www by default. It then asks whether DNS is ready unless --skip-ssl is set.
+After preflight checks, review the configuration and press Enter or Y to create,
+or N to cancel. Non-interactive runs require --domain and --yes.
+
+Examples:
+  sudo $0
+  sudo $0 --domain beta.example.com --name example_site --no-www
+  sudo $0 --domain example.com --www
+  sudo $0 --domain shop.example.com --no-www --skip-ssl --yes
+EOF
+}
+batch=false domain_arg= name_arg= skip_ssl=false yes=false domain_seen=false name_seen=false www_mode=auto www_seen=false
 while (($#)); do
   case "$1" in
     --domain) (($# >= 2)) && [[ "$domain_seen" == false && -n "$2" && "$2" != -* ]] || { usage >&2; exit 2; }; domain_arg=$2; domain_seen=true; batch=true; shift 2 ;;
     --name) (($# >= 2)) && [[ "$name_seen" == false && -n "$2" && "$2" != -* ]] || { usage >&2; exit 2; }; name_arg=$2; name_seen=true; shift 2 ;;
     --skip-ssl) [[ "$skip_ssl" == false ]] || exit 2; skip_ssl=true; shift ;;
+    --www|--no-www)
+      [[ "$www_seen" == false ]] || { echo "Choose only one of --www or --no-www" >&2; exit 2; }
+      www_seen=true; [[ "$1" == --www ]] && www_mode=www || www_mode=no-www; shift ;;
     --yes) [[ "$yes" == false ]] || exit 2; yes=true; shift ;;
     --help|-h) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
@@ -33,6 +63,13 @@ vhost_name=$name_arg
 [[ -n "$vhost_name" ]] || vhost_name=$(derive_vhost_name "$domain")
 valid_vhost_name "$vhost_name" || { echo "Error: identifier must match ^[a-z][a-z0-9_]{0,31}$" >&2; exit 1; }
 explicit_name=$name_seen
+www_prompt=false
+[[ "$yes" == false && -t 0 ]] && www_prompt=true
+select_www_alias "$domain" "$www_mode" "$www_prompt" || exit 1
+www_server_name=
+[[ "$include_www" == true ]] && www_server_name="www.$domain"
+set_requested_vhost_names "$domain" "$include_www"
+echo "WWW alias selection: $([[ "$include_www" == true ]] && echo "www.$domain included" || echo "not included")"
 if [[ "$batch" == false && "$skip_ssl" == false ]]; then
   while :; do
     read -r -p "Have DNS records been set up for $domain? (yes/no): " dns_ready || exit 1
@@ -67,11 +104,11 @@ if [[ "$skip_ssl" == false ]]; then
   command -v dig >/dev/null || { echo "dig is required for DNS validation" >&2; exit 1; }
   command -v certbot >/dev/null || { echo "Certbot is required unless --skip-ssl is used" >&2; exit 1; }
   cert_listing=$(certbot certificates 2>/dev/null) || { echo "Could not inspect existing Certbot certificates" >&2; exit 1; }
-  if certbot_lineage_conflicts "$cert_listing" "$domain"; then
+  if certbot_lineage_conflicts "$cert_listing" "$domain" "$include_www"; then
     echo "Refusing existing Certbot lineage or certificate domain for $domain" >&2; exit 1
   fi
-  server_ip=$(hostname -I | awk '{print $1}'); domain_ip=$(dig +short "$domain" | tail -n1)
-  [[ -n "$domain_ip" && "$domain_ip" == "$server_ip" ]] || { echo "DNS for $domain does not resolve to this server" >&2; exit 1; }
+  server_ip=$(hostname -I | awk '{print $1}')
+  check_vhost_dns "$server_ip" "${requested_dns_names[@]}" || exit 1
 fi
 if [[ -e "$VHOST_NAME_MAP" || -L "$VHOST_NAME_MAP" ]]; then
   validate_name_map "$VHOST_NAME_MAP" || exit 1
@@ -82,7 +119,7 @@ nginx -t
 if [[ "$yes" == false ]]; then
   tty=false; [[ -t 0 ]] && tty=true
   require_confirmation_mode "$yes" "$tty" || exit 1
-  confirm_provisioning "$domain" "$vhost_name" "$explicit_name" "$skip_ssl" "$VHOSTS_BASE_DIR" || exit 0
+  confirm_provisioning "$domain" "$vhost_name" "$explicit_name" "$skip_ssl" "$VHOSTS_BASE_DIR" "$include_www" || exit 0
 fi
 mkdir -p "$VHOSTS_DIR" || { echo "Could not create credentials directory: $VHOSTS_DIR" >&2; exit 1; }
 chmod 700 "$VHOSTS_DIR" || { echo "Could not secure credentials directory: $VHOSTS_DIR" >&2; exit 1; }
@@ -100,7 +137,14 @@ rollback() {
   if [[ "$db_user_created" == true ]]; then mysql -e "DROP USER '$db_user'@'localhost';"; fi
   if [[ "$db_created" == true ]]; then mysql -e "DROP DATABASE \`$db_name\`;"; fi
   [[ "$credentials_created" == true ]] && rm -f -- "$output_file"
-  [[ "$webroot_created" == true ]] && { rmdir "$webroot/public_html" "$webroot/logs" "$webroot" 2>/dev/null || true; }
+  if [[ "$webroot_created" == true ]]; then
+    if [[ "$config_created" == true ]]; then
+      for nginx_log in "$webroot/logs/access.log" "$webroot/logs/error.log"; do
+        [[ -f "$nginx_log" && ! -L "$nginx_log" && "$(stat -c '%u' "$nginx_log" 2>/dev/null)" == 0 ]] && rm -f -- "$nginx_log"
+      done
+    fi
+    rmdir "$webroot/public_html" "$webroot/logs" "$webroot" 2>/dev/null || true
+  fi
   if [[ "$user_created" == true ]] && id "$vhost_name" >/dev/null 2>&1; then
     # Delete only the account created here; never remove its home recursively.
     userdel "$vhost_name" 2>/dev/null || true
@@ -138,7 +182,7 @@ db_user_created=true
 mysql -e "GRANT ALL PRIVILEGES ON \`$db_name\`.* TO '$db_user'@'localhost'; FLUSH PRIVILEGES;" || fail "Failed to grant database privileges"
 
 tmp_config=$(mktemp "$NGINX_CONFIG_DIR/.${vhost_name}.XXXXXX")
-sed -e "s|__DOMAIN__|$domain|g" -e "s|__VHOST_NAME__|$vhost_name|g" -e "s|__VHOSTS_BASE_DIR__|$VHOSTS_BASE_DIR|g" -e "s|__PHP_FPM_VERSION__|$PHP_FPM_VERSION|g" "$template_file" > "$tmp_config" || fail "Failed to render Nginx config"
+sed -e "s|__DOMAIN__|$domain|g" -e "s|__VHOST_NAME__|$vhost_name|g" -e "s|__WWW_DOMAIN__|$www_server_name|g" -e "s|__VHOSTS_BASE_DIR__|$VHOSTS_BASE_DIR|g" -e "s|__PHP_FPM_VERSION__|$PHP_FPM_VERSION|g" "$template_file" > "$tmp_config" || fail "Failed to render Nginx config"
 ln -- "$tmp_config" "$nginx_config" || fail "Could not atomically install Nginx config"
 config_created=true
 rm -f -- "$tmp_config"
@@ -164,10 +208,10 @@ credentials_created=true
 rm -f "$tmp_credentials"
 tmp_credentials=
 if [[ "$skip_ssl" == false ]]; then
-  certbot --nginx -d "$domain" -d "www.$domain" --non-interactive --agree-tos --register-unsafely-without-email || fail "Certbot failed"
+  certbot --nginx "${certbot_domain_args[@]}" --non-interactive --agree-tos --register-unsafely-without-email || fail "Certbot failed"
 fi
 cert_name=- ssl_created=false
 if [[ "$skip_ssl" == false ]]; then cert_name=$domain; ssl_created=true; fi
-write_name_mapping "$domain" "$vhost_name" "$db_name" "$cert_name" "$VHOSTS_BASE_DIR" "$ssl_created" "$VHOST_NAME_MAP" || fail "Could not securely save domain-to-identifier mapping"
+write_name_mapping "$domain" "$vhost_name" "$db_name" "$cert_name" "$VHOSTS_BASE_DIR" "$ssl_created" "$include_www" "$VHOST_NAME_MAP" || fail "Could not securely save domain-to-identifier mapping"
 trap - ERR
 echo "Vhost $domain (system identifier $vhost_name) created successfully. Credentials: $output_file"

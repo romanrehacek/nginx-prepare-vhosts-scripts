@@ -47,19 +47,46 @@ Keep the scripts and template together, then make the entry points executable:
 
 ```bash
 sudo chmod +x prepare_vhost.sh remove_vhost.sh
+```
+
+Run `--help` for the options and examples:
+
+```bash
+sudo ./prepare_vhost.sh --help
+sudo ./remove_vhost.sh --help
+```
+
+### Interactive setup without parameters
+
+For a guided setup, start the script without options:
+
+```bash
 sudo ./prepare_vhost.sh
 ```
 
-With no options, the script asks for a domain and whether DNS is ready. The domain is validated as a DNS hostname and is used unchanged for the webroot, Nginx config, SSL certificate, and credential filename. A separate Linux account/database identifier is derived deterministically: its sanitized full form is used when it fits, otherwise it is shortened with a stable hash suffix. Numeric-leading names receive a letter prefix. Supply `--name IDENTIFIER` to choose one; identifiers must match `^[a-z][a-z0-9_]{0,31}$` and are used as entered.
+Then follow the prompts:
+
+1. Enter the full domain, for example `beta.example.com`.
+2. For a likely root domain with two labels, such as `example.com`, choose whether to include `www.example.com`. Press Enter or `Y` for yes, or `n` to omit it. Subdomains omit `www` automatically.
+3. Unless you started with `--skip-ssl`, answer whether DNS is ready. Answer yes only after every requested hostname points to this server; answer no to create an HTTP-only vhost without requesting a certificate.
+4. Review the preflight summary. Press Enter or `Y` to create the vhost, or `n` to cancel. Invalid answers repeat the prompt; EOF cancels without changes.
+5. After success, the credentials are saved in `/root/vhosts/<domain>.txt`.
+
+The automatic root-domain guess counts labels: two labels are treated as a likely root domain. For domains such as `example.co.uk`, use `--www` or `--no-www` to choose explicitly.
+
+The domain is validated as a DNS hostname and is used unchanged for the webroot, Nginx config, SSL certificate, and credential filename. A separate Linux account/database identifier is derived deterministically: its sanitized full form is used when it fits, otherwise it is shortened with a stable hash suffix. Numeric-leading names receive a letter prefix. Supply `--name IDENTIFIER` to choose one; identifiers must match `^[a-z][a-z0-9_]{0,31}$` and are used as entered.
+
+The `www` alias is prompted for interactively when the domain has exactly two labels, such as `example.com`. The simple default heuristic assumes that a two-label name is a likely root domain: batch runs and `--yes` include `www` for those domains and omit it for subdomains. Override this with `--www` or `--no-www`. The chosen name list is used consistently in the Nginx `server_name`, Certbot request, and DNS preflight; every requested hostname must resolve to this server.
 
 For automated provisioning, pass `--domain`; batch mode does not prompt for the domain. All read-only checks run before the final confirmation. The confirmation preview lists the domain, identifier, Linux user, database, database user, and webroot. Press Enter, `Y`, or `y` to continue; `N` or `n` cancels. Invalid answers are repeated. When the name is derived, the preview includes a rerun command and a hint for choosing a different name. Use `--yes` to skip confirmation. Non-interactive use requires `--yes`.
 
 ```bash
 sudo ./prepare_vhost.sh --domain example.com --skip-ssl
 sudo ./prepare_vhost.sh --domain a-very-long-domain-name.example --name customer_42 --skip-ssl --yes
+sudo ./prepare_vhost.sh --domain shop.example.com --no-www --yes
 ```
 
-For a list of domains (one per line, blank lines and `#` comments ignored), explicitly stop at the first failure:
+For a list of domains (one per line, blank lines and `#` comments ignored), explicitly stop at the first failure. `--yes` enables unattended operation and applies the documented domain-label heuristic:
 
 ```bash
 while IFS= read -r domain || [ -n "$domain" ]; do
@@ -71,7 +98,7 @@ while IFS= read -r domain || [ -n "$domain" ]; do
 done < domains.txt
 ```
 
-Before running, ensure the configured `VHOSTS_BASE_DIR` already exists and its volume is mounted. The script refuses existing webroots, Nginx configs, credentials, accounts, groups, databases, database users, and any matching Certbot lineage or domain; rerunning for a provisioned domain exits with an error. Any provisioning failure exits nonzero and attempts cleanup only for resources created by that invocation. Certbot can leave certificate or renewal residue if it fails partway through; the script deliberately does not automatically delete Certbot lineages during rollback, so inspect Certbot state before retrying after an SSL failure.
+Before running, ensure the configured `VHOSTS_BASE_DIR` already exists and its volume is mounted. The script refuses existing webroots, Nginx configs, credentials, accounts, groups, databases, database users, and any matching Certbot lineage or domain; rerunning for a provisioned domain exits with an error. Any provisioning failure exits nonzero and attempts cleanup only for resources created by that invocation. Rollback removes only regular Nginx `access.log` and `error.log` files in the new webroot, then removes the directories only if they are empty; unexpected or user-created files are left in place. Certbot can leave certificate or renewal residue if it fails partway through; the script deliberately does not automatically delete Certbot lineages during rollback, so inspect Certbot state before retrying after an SSL failure.
 
 The script creates:
 
@@ -80,7 +107,7 @@ The script creates:
 - An Nginx config in `/etc/nginx/conf.d`.
 - SSL certificates with Certbot when DNS is ready, unless `--skip-ssl` is used.
 - Access details in `/root/vhosts/<domain>.txt`.
-- A root-owned, mode-restricted identifier map at `/root/vhosts/.vhost-name-map`. It contains the domain, system identifier, database identifier, certificate lineage and SSL-created flag, and original webroot base path; it is not a credentials file. Removal requires a valid mapping and never guesses identifiers or paths for legacy vhosts. It uses the recorded base path even if `.env` changed later, then verifies that volume is mounted before touching it.
+- A root-owned, mode-restricted identifier map at `/root/vhosts/.vhost-name-map`. It contains the domain, system identifier, database identifier, certificate lineage and SSL-created flag, original webroot base path, and whether `www` was requested; it is not a credentials file. Removal requires a valid mapping and never guesses identifiers or paths for legacy vhosts. It uses the recorded base path even if `.env` changed later, then verifies that volume is mounted before touching it.
 
 For each domain, the directory structure is:
 
