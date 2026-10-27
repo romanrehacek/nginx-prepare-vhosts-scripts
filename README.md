@@ -47,10 +47,34 @@ Keep the scripts and template together, then make the entry points executable:
 
 ```bash
 sudo chmod +x prepare_vhost.sh remove_vhost.sh
+```
+
+Run `--help` for the options and examples:
+
+```bash
+sudo ./prepare_vhost.sh --help
+sudo ./remove_vhost.sh --help
+```
+
+### Interactive setup without parameters
+
+For a guided setup, start the script without options:
+
+```bash
 sudo ./prepare_vhost.sh
 ```
 
-With no options, the script asks for a domain and whether DNS is ready. The domain is validated as a DNS hostname and is used unchanged for the webroot, Nginx config, SSL certificate, and credential filename. A separate Linux account/database identifier is derived deterministically: its sanitized full form is used when it fits, otherwise it is shortened with a stable hash suffix. Numeric-leading names receive a letter prefix. Supply `--name IDENTIFIER` to choose one; identifiers must match `^[a-z][a-z0-9_]{0,31}$` and are used as entered.
+Then follow the prompts:
+
+1. Enter the full domain, for example `beta.example.com`.
+2. For a likely root domain with two labels, such as `example.com`, choose whether to include `www.example.com`. Press Enter or `Y` for yes, or `n` to omit it. Subdomains omit `www` automatically.
+3. Unless you started with `--skip-ssl`, answer whether DNS is ready. Answer yes only after every requested hostname points to this server; answer no to create an HTTP-only vhost without requesting a certificate.
+4. Review the preflight summary. Press Enter or `Y` to create the vhost, or `n` to cancel. Invalid answers repeat the prompt; EOF cancels without changes.
+5. After success, the credentials are saved in `/root/vhosts/<domain>.txt`.
+
+The automatic root-domain guess counts labels: two labels are treated as a likely root domain. For domains such as `example.co.uk`, use `--www` or `--no-www` to choose explicitly.
+
+The domain is validated as a DNS hostname and is used unchanged for the webroot, Nginx config, SSL certificate, and credential filename. A separate Linux account/database identifier is derived deterministically: its sanitized full form is used when it fits, otherwise it is shortened with a stable hash suffix. Numeric-leading names receive a letter prefix. Supply `--name IDENTIFIER` to choose one; identifiers must match `^[a-z][a-z0-9_]{0,31}$` and are used as entered.
 
 The `www` alias is prompted for interactively when the domain has exactly two labels, such as `example.com`. The simple default heuristic assumes that a two-label name is a likely root domain: batch runs and `--yes` include `www` for those domains and omit it for subdomains. Override this with `--www` or `--no-www`. The chosen name list is used consistently in the Nginx `server_name`, Certbot request, and DNS preflight; every requested hostname must resolve to this server.
 
