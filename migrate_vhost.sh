@@ -238,32 +238,32 @@ wp --allow-root --path="$dest_webroot" config set DB_HOST "$dest_db_host" --type
 
 old_fs="$old_root"
 new_fs="$dest_webroot"
-replace_output=$(wp --allow-root --path="$dest_webroot" search-replace "$old_fs" "$new_fs" --all-tables-with-prefix --skip-columns=guid --dry-run 2>&1) || die "Path search-replace dry run failed."
-printf '%s\n' "$replace_output" | sed -E 's/[0-9]+ replacements/REPLACEMENTS/'
-path_count=$(printf '%s\n' "$replace_output" | awk '/Success: Made [0-9]+ replacements/ {print $3; exit}')
-path_count=${path_count:-0}
+replace_output=$(wp --allow-root --skip-themes --skip-plugins --path="$dest_webroot" search-replace "$old_fs" "$new_fs" --all-tables-with-prefix --skip-columns=guid --dry-run 2>&1) || die "Path search-replace dry run failed."
+printf '%s\n' "$replace_output"
+path_count=$(printf '%s\n' "$replace_output" | awk '/^Success:/ {for (i=2;i<=NF;i++) if ($i ~ /^[0-9]+$/ && $(i+1) ~ /^replacements?[.]?$/) {print $i; exit}}')
+[[ "$path_count" =~ ^[0-9]+$ ]] || die "Could not determine the path replacement count; no replacements applied."
 if (( path_count > 0 )); then
   confirm_tty "Apply $path_count filesystem path replacements in WordPress data?"
-  wp --allow-root --path="$dest_webroot" search-replace "$old_fs" "$new_fs" --all-tables-with-prefix --skip-columns=guid --quiet || die "Path replacement failed."
+  wp --allow-root --skip-themes --skip-plugins --path="$dest_webroot" search-replace "$old_fs" "$new_fs" --all-tables-with-prefix --skip-columns=guid --quiet || die "Path replacement failed."
 fi
 
-old_home=$(wp --allow-root --path="$dest_webroot" option get home --quiet) || die "Could not read pre-migration WordPress home URL."
-old_host=$(php -r '$u=parse_url($argv[0], PHP_URL_HOST); if(!$u) exit(1); echo $u;' "$old_home") || die "Could not parse source WordPress home URL."
+old_home=$(wp --allow-root --skip-themes --skip-plugins --path="$dest_webroot" option get home --quiet) || die "Could not read pre-migration WordPress home URL."
+old_host=$(php -r '$u=parse_url($argv[1], PHP_URL_HOST); if(!$u) exit(1); echo $u;' "$old_home") || die "Could not parse source WordPress home URL."
 url_count=0
 if [[ "${old_host,,}" != "${domain,,}" ]]; then
-  url_output=$(wp --allow-root --path="$dest_webroot" search-replace "$old_host" "$domain" --all-tables-with-prefix --skip-columns=guid --dry-run 2>&1) || die "URL search-replace dry run failed."
-  printf '%s\n' "$url_output" | sed -E 's/[0-9]+ replacements/REPLACEMENTS/'
-  url_count=$(printf '%s\n' "$url_output" | awk '/Success: Made [0-9]+ replacements/ {print $3; exit}')
-  url_count=${url_count:-0}
+  url_output=$(wp --allow-root --skip-themes --skip-plugins --path="$dest_webroot" search-replace "$old_host" "$domain" --all-tables-with-prefix --skip-columns=guid --dry-run 2>&1) || die "URL search-replace dry run failed."
+  printf '%s\n' "$url_output"
+  url_count=$(printf '%s\n' "$url_output" | awk '/^Success:/ {for (i=2;i<=NF;i++) if ($i ~ /^[0-9]+$/ && $(i+1) ~ /^replacements?[.]?$/) {print $i; exit}}')
+  [[ "$url_count" =~ ^[0-9]+$ ]] || die "Could not determine the URL replacement count; no URL replacements applied."
   if (( url_count > 0 )); then
     confirm_tty "Apply $url_count URL replacements from $old_host to $domain?"
-    wp --allow-root --path="$dest_webroot" search-replace "$old_host" "$domain" --all-tables-with-prefix --skip-columns=guid --quiet || die "URL replacement failed."
+    wp --allow-root --skip-themes --skip-plugins --path="$dest_webroot" search-replace "$old_host" "$domain" --all-tables-with-prefix --skip-columns=guid --quiet || die "URL replacement failed."
   fi
 fi
 wp --allow-root --path="$dest_webroot" db check || die "WordPress database check failed."
-wp --allow-root --path="$dest_webroot" core is-installed || die "WordPress core is not installed."
-home=$(wp --allow-root --path="$dest_webroot" option get home --quiet) || die "Could not read WordPress home URL."
-siteurl=$(wp --allow-root --path="$dest_webroot" option get siteurl --quiet) || die "Could not read WordPress site URL."
+wp --allow-root --skip-themes --skip-plugins --path="$dest_webroot" core is-installed || die "WordPress core is not installed."
+home=$(wp --allow-root --skip-themes --skip-plugins --path="$dest_webroot" option get home --quiet) || die "Could not read WordPress home URL."
+siteurl=$(wp --allow-root --skip-themes --skip-plugins --path="$dest_webroot" option get siteurl --quiet) || die "Could not read WordPress site URL."
 [[ -d "$dest_webroot/wp-content/uploads" ]] || echo "Notice: wp-content/uploads directory is absent."
 nginx -t || die "Nginx configuration test failed."
 printf '\nMigration completed\nDomain: %s\nFiles: OK\nDatabase import: OK (%s prefixed tables)\nWP config: OK\nPath replacements: %s\nURL replacements: %s\nPermissions: OK\nWordPress: OK (home=%s, siteurl=%s)\nNginx: OK\n' "$domain" "$imported" "$path_count" "$url_count" "$home" "$siteurl"
