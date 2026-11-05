@@ -215,7 +215,25 @@ cp -p "$wp_config" "$wp_config_backup" || die "Could not back up destination wp-
 chmod 600 "$wp_config_backup"
 wp --allow-root --path="$dest_webroot" config set DB_NAME "$dest_db" --type=constant --quiet
 wp --allow-root --path="$dest_webroot" config set DB_USER "$dest_db_user" --type=constant --quiet
-wp --allow-root --path="$dest_webroot" config set DB_PASSWORD --type=constant --prompt=value --quiet <<< "$dest_db_pass" || die "Could not update DB_PASSWORD."
+# WP-CLI does not reliably prompt for the required positional value. Set a
+# non-secret marker first, then replace it with a PHP-quoted value via stdin.
+password_marker="__VHOST_MIGRATION_PASSWORD_$(date +%s)_$$_MARKER__"
+wp --allow-root --path="$dest_webroot" config set DB_PASSWORD "$password_marker" --type=constant --quiet || die "Could not prepare DB_PASSWORD update."
+printf '%s' "$dest_db_pass" | php -r '
+$path = $argv[1]; $marker = $argv[2];
+$password = stream_get_contents(STDIN);
+$source = file_get_contents($path);
+$needle = "\x27" . $marker . "\x27";
+if ($source === false || substr_count($source, $needle) !== 1) { exit(1); }
+$result = str_replace($needle, var_export($password, true), $source);
+$stat = stat($path); $tmp = tempnam(dirname($path), ".wp-config-");
+if ($stat === false || $tmp === false) { exit(1); }
+if (file_put_contents($tmp, $result, LOCK_EX) !== strlen($result) ||
+    !chmod($tmp, $stat["mode"] & 0777) || !chown($tmp, $stat["uid"]) ||
+    !chgrp($tmp, $stat["gid"]) || !rename($tmp, $path)) {
+    @unlink($tmp); exit(1);
+}
+' "$wp_config" "$password_marker" || die "Could not update DB_PASSWORD; restore the protected wp-config backup or retry with --resume."
 wp --allow-root --path="$dest_webroot" config set DB_HOST "$dest_db_host" --type=constant --quiet
 
 old_fs="$old_root"
