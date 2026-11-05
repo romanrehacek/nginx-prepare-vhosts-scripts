@@ -6,6 +6,8 @@ Bash scripts for creating and removing Nginx virtual hosts on Ubuntu/Debian serv
 
 - `prepare_vhost.sh` creates a vhost, SFTP account, MySQL database/user, Nginx config, and (when DNS is ready) SSL certificates.
 - `remove_vhost.sh` removes those resources for a domain.
+- `migrate_vhost.sh` migrates a WordPress site from the configured old server into a provisioned vhost.
+- `migration_state.sh` validates and updates root-private migration resume state.
 - `template.conf` is the Nginx server-block template.
 - `vhost_config.sh` safely reads the local configuration shared by both scripts.
 - `vhost_metadata.sh` validates and updates the root-owned domain-to-system-identifier map.
@@ -19,6 +21,7 @@ The scripts look for `.env` in their own directory. If it is absent, they keep t
 
 - PHP-FPM socket version: `8.3`
 - Domain directory base: `/var/www`
+- Migration source: `roman@95.217.187.159:10023`, using `/home/roman/.ssh/id_ed25519_oldserver`
 
 To set custom values, copy the example and edit it:
 
@@ -33,11 +36,15 @@ Example for a mounted web volume:
 ```dotenv
 PHP_FPM_VERSION=8.3
 VHOSTS_BASE_DIR=/mnt/web-volume/www
+MIGRATION_SOURCE_HOST=95.217.187.159
+MIGRATION_SOURCE_USER=roman
+MIGRATION_SOURCE_PORT=10023
+MIGRATION_SSH_KEY=/home/roman/.ssh/id_ed25519_oldserver
 ```
 
 The base directory is the parent of each domain directory. With the example above, the webroot for `example.com` becomes `/mnt/web-volume/www/example.com/public_html`; logs go to `/mnt/web-volume/www/example.com/logs`.
 
-Use only the two supported `KEY=VALUE` lines. Values must not be quoted and must not contain spaces or inline comments. The loader validates both values and treats the file as data; it never evaluates shell commands. Unknown or malformed settings make the scripts stop before changing the server. `.env` is ignored by Git; commit `.env.example`, never the local `.env`. Do not store passwords or other secrets in it.
+Use only the documented `KEY=VALUE` lines. Values must not be quoted and must not contain spaces or inline comments. The loader validates the values and treats the file as data; it never evaluates shell commands. Unknown or malformed settings make the scripts stop before changing the server. `.env` is ignored by Git; commit `.env.example`, never the local `.env`. Do not store passwords or other secrets in it.
 
 The PHP-FPM setting controls the socket rendered into each new Nginx config, for example `/var/run/php/php8.3-fpm.sock`. The Nginx config directory remains `/etc/nginx/conf.d`.
 
@@ -119,14 +126,23 @@ VHOSTS_BASE_DIR/<domain>/
 
 For the defaults, this is `/var/www/<domain>/`. The public webroot is `public_html/`.
 
-## WordPress setup and migration
+## WordPress migration
 
-1. Create the vhost and database with `prepare_vhost.sh`.
-2. Install a clean WordPress copy into that domain's `public_html/` and complete its initial setup.
-3. Use the credentials saved in `/root/vhosts/<domain>.txt` when configuring the destination site.
-4. Use WP Migrate Pro to move the live site's database and files to the new installation, then verify the site and URLs before switching traffic.
+`migrate_vhost.sh` copies a beta/development WordPress site to the new server. It uses the existing source SSH key and trusted `known_hosts`; install/verify the source host key through your normal process first. It never disables host-key checking. Run it from this directory:
 
-These scripts provision the server-side vhost and database; they do not install WordPress or perform the content migration.
+```bash
+sudo ./migrate_vhost.sh beta.example.com
+# Optional source/path/name overrides, resume after interruption, or skip safe confirmations:
+sudo ./migrate_vhost.sh beta.example.com --source-host old.example.net --source-port 10023 --ssh-key /home/roman/.ssh/id_ed25519_oldserver
+sudo ./migrate_vhost.sh beta.example.com --source-path /mnt/old/domains/beta.example.com/public --name beta_site
+sudo ./migrate_vhost.sh beta.example.com --resume
+```
+
+If the destination vhost is absent, the migration invokes `prepare_vhost.sh --skip-ssl --yes` only after source database access and destination mount/disk checks pass, then reads its protected `/root/vhosts/<domain>.txt` record. The migration checks SSH access, source files, local MariaDB/MySQL, tools, and free disk space; copies all files with `rsync` (no `--delete`); imports the source database into the recorded destination database; and updates WordPress DB settings. Existing destination files or database tables are backed up before merge/replacement and always require an interactive confirmation, even with `--yes`. Database and `wp-config.php` backups are stored under `/root/vhosts/` with mode `0600`; the file archive is stored beside the destination webroot. Progress is recorded in `/var/lib/nginx-prepare-vhosts/migrations/<domain>.state`, bound to the source host/user/port/path/key and destination path/database. Use `--resume` only after inspecting the state and backups. A completed state makes repeated `--resume` return without rerunning migration steps.
+
+The script supports ordinary literal `define()` values for `DB_NAME`, `DB_USER`, `DB_PASSWORD`, and `DB_HOST`, plus a literal `$table_prefix` in the source `wp-config.php`. It does not execute the old config. Dynamic PHP expressions must be converted to literal values before migration. Path replacement is previewed and requires confirmation; URL replacement is limited to a changed hostname inferred from the imported WordPress `home` option. Both use WP-CLI serialization-aware search-replace and skip `guid`. It applies the provisioning account/group ownership and `2775` directories/`0664` files. Review site URLs, uploads, plugins and access before switching traffic.
+
+The script is intended for a one-time beta/development move, not ongoing synchronization. It does not change the source server, DNS, maintenance mode, or live traffic. Do not use it on production without a separately planned migration and recovery window.
 
 ## Remove a vhost
 

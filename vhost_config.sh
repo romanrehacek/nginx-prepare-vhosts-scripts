@@ -7,9 +7,14 @@ load_vhost_config() {
     local line key value line_number=0
     local seen_php=false
     local seen_base=false
+    local seen_migration_host=false seen_migration_user=false seen_migration_port=false seen_migration_key=false
 
     PHP_FPM_VERSION="8.3"
     VHOSTS_BASE_DIR="/var/www"
+    MIGRATION_SOURCE_HOST="95.217.187.159"
+    MIGRATION_SOURCE_USER="roman"
+    MIGRATION_SOURCE_PORT="10023"
+    MIGRATION_SSH_KEY="/home/roman/.ssh/id_ed25519_oldserver"
 
     if [[ ! -e "$config_file" ]]; then
         return 0
@@ -53,6 +58,14 @@ load_vhost_config() {
                 VHOSTS_BASE_DIR="$value"
                 seen_base=true
                 ;;
+            MIGRATION_SOURCE_HOST|MIGRATION_SOURCE_USER|MIGRATION_SOURCE_PORT|MIGRATION_SSH_KEY)
+                case "$key" in
+                    MIGRATION_SOURCE_HOST) [[ "$seen_migration_host" == false ]] || { echo "[!] ERROR: Duplicate $key at $config_file:$line_number" >&2; return 1; }; MIGRATION_SOURCE_HOST="$value"; seen_migration_host=true ;;
+                    MIGRATION_SOURCE_USER) [[ "$seen_migration_user" == false ]] || { echo "[!] ERROR: Duplicate $key at $config_file:$line_number" >&2; return 1; }; MIGRATION_SOURCE_USER="$value"; seen_migration_user=true ;;
+                    MIGRATION_SOURCE_PORT) [[ "$seen_migration_port" == false ]] || { echo "[!] ERROR: Duplicate $key at $config_file:$line_number" >&2; return 1; }; MIGRATION_SOURCE_PORT="$value"; seen_migration_port=true ;;
+                    MIGRATION_SSH_KEY) [[ "$seen_migration_key" == false ]] || { echo "[!] ERROR: Duplicate $key at $config_file:$line_number" >&2; return 1; }; MIGRATION_SSH_KEY="$value"; seen_migration_key=true ;;
+                esac
+                ;;
             *)
                 echo "[!] ERROR: Unsupported setting '$key' at $config_file:$line_number" >&2
                 return 1
@@ -87,6 +100,11 @@ load_vhost_config() {
             return 1
             ;;
     esac
+
+    [[ "$MIGRATION_SOURCE_HOST" =~ ^[A-Za-z0-9.-]+$ ]] || { echo "[!] ERROR: MIGRATION_SOURCE_HOST is invalid" >&2; return 1; }
+    [[ "$MIGRATION_SOURCE_USER" =~ ^[A-Za-z_][A-Za-z0-9_-]*$ ]] || { echo "[!] ERROR: MIGRATION_SOURCE_USER is invalid" >&2; return 1; }
+    [[ "$MIGRATION_SOURCE_PORT" =~ ^[0-9]{1,5}$ ]] && ((10#$MIGRATION_SOURCE_PORT > 0 && 10#$MIGRATION_SOURCE_PORT < 65536)) || { echo "[!] ERROR: MIGRATION_SOURCE_PORT must be between 1 and 65535" >&2; return 1; }
+    [[ "$MIGRATION_SSH_KEY" == /* && "$MIGRATION_SSH_KEY" != *' '* && "$MIGRATION_SSH_KEY" != *'..'* ]] || { echo "[!] ERROR: MIGRATION_SSH_KEY must be a safe absolute path without spaces or '..'" >&2; return 1; }
 
     return 0
 }
