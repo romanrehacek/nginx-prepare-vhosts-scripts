@@ -104,13 +104,13 @@ trap cleanup EXIT
 ssh "${ssh_opts[@]}" "$remote" "cat '$old_root/wp-config.php'" > "$source_config" || die "Could not read source wp-config.php."
 extract_php_literal() {
   local key=$1
-  php -r '$s=file_get_contents($argv[0]); $k=$argv[1]; $q=preg_quote($k,"/"); if(!preg_match("/define\\s*\\(\\s*[\x27\\\"]".$q."[\x27\\\"]\\s*,\\s*([\x27\\\"])(.*?)\\1\\s*\\)\\s*;/s",$s,$m)){exit(1);} echo stripcslashes($m[2]);' "$source_config" "$key"
+  php -r '$s=file_get_contents($argv[1]); $k=$argv[2]; $q=preg_quote($k,"/"); if(!preg_match("/define\\s*\\(\\s*[\x27\\\"]".$q."[\x27\\\"]\\s*,\\s*([\x27\\\"])(.*?)\\1\\s*\\)\\s*;/s",$s,$m)){exit(1);} echo stripcslashes($m[2]);' "$source_config" "$key"
 }
 src_db=$(extract_php_literal DB_NAME) || die "Source wp-config DB_NAME must be a literal string define."
 src_user=$(extract_php_literal DB_USER) || die "Source wp-config DB_USER must be a literal string define."
 src_pass=$(extract_php_literal DB_PASSWORD) || die "Source wp-config DB_PASSWORD must be a literal string define."
 src_host=$(extract_php_literal DB_HOST) || die "Source wp-config DB_HOST must be a literal string define."
-prefix=$(sed -nE "s/^[[:space:]]*\$table_prefix[[:space:]]*=[[:space:]]*['\"]([^'\"]+)['\"][[:space:]]*;.*/\1/p" "$source_config" | head -n1)
+prefix=$(sed -nE "s/^[[:space:]]*\\\$table_prefix[[:space:]]*=[[:space:]]*['\"]([^'\"]+)['\"][[:space:]]*;.*/\1/p" "$source_config" | head -n1)
 [[ "$src_db" =~ ^[A-Za-z0-9_]+$ && "$src_user" =~ ^[A-Za-z0-9_]+$ && -n "$src_pass" && -n "$src_host" ]] || die "Source database settings are unsupported or unsafe."
 [[ "$prefix" =~ ^[A-Za-z0-9_]+$ ]] || die "Could not safely read literal table_prefix from wp-config.php."
 printf '[client]\nuser=%s\npassword=%s\nhost=%s\n' "$src_user" "$src_pass" "$src_host" > "$source_defaults"
