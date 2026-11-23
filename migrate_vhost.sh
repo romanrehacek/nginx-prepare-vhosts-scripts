@@ -193,8 +193,19 @@ if [[ "$resume" != true ]] || ! has_step files; then
             $transfer_started //= $now;
             my $seconds = int($now - $transfer_started);
             my $elapsed = sprintf("%02d:%02d:%02d", int($seconds / 3600), int($seconds / 60) % 60, $seconds % 60);
-            my $eta = $counts =~ /\bto-chk=0\// ? "00:00:00"
-              : $counts =~ /\bxfr#/ ? "--:--:--" : sprintf("%08s", $rsync_time) =~ s/ /0/gr;
+            my $eta = sprintf("%08s", $rsync_time) =~ s/ /0/gr;
+            if ($counts =~ /\bto-chk=0\//) {
+              $eta = "00:00:00";
+            } elsif ($counts =~ /\bxfr#/ && $rate =~ /([0-9]+)%/) {
+              my $percent = $1;
+              $eta = "--:--:--";
+              if ($percent > 0) {
+                my $estimate = ($now - $transfer_started) * (100 - $percent) / $percent;
+                my $remaining = int($estimate);
+                $remaining++ if $remaining < $estimate;
+                $eta = sprintf("%02d:%02d:%02d", int($remaining / 3600), int($remaining / 60) % 60, $remaining % 60);
+              }
+            }
             $line = "$amount / ~$total$rate${space}ETA $eta  Elapsed $elapsed$counts";
           }
           print $line, $separator;
