@@ -171,6 +171,7 @@ if [[ "$resume" != true ]] || ! has_step files; then
   LC_ALL=C rsync -ah --no-inc-recursive --info=flist2,progress2,name0 -e "ssh -p $source_port -i $ssh_key -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$known_hosts" "$remote:$old_root/" "$dest_webroot/" | perl -e '
     $| = 1;
     my $pending = "";
+    my $total = sprintf("%.2f GB", $ARGV[0] / 1000000000);
     while (1) {
       my $length = sysread(STDIN, my $chunk, 8192);
       die "Could not read rsync output: $!" unless defined $length;
@@ -183,12 +184,13 @@ if [[ "$resume" != true ]] || ! has_step files; then
         } elsif ($line =~ /^([0-9]+) files? to consider$/) {
           print "File list ready ($1 entries).\n\nTransferring files...\n";
         } else {
+          $line =~ s/^(\s*[0-9][0-9.,]*[KMGTPE]?)(\s+\d+%)/$1 \/ ~$total$2/;
           print $line, $separator;
         }
       }
     }
     print $pending;
-  ' || die "File transfer failed."
+  ' "$source_size" || die "File transfer failed."
   printf '\nFile transfer complete.\n\n'
   chown -R "$(get_record_value 'SFTP username' "$vhost_file"):sftponly" "$dest_webroot"
   find "$dest_webroot" -type d -exec chmod 2775 {} +
