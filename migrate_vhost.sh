@@ -73,7 +73,7 @@ valid_vhost_domain "$domain" || die "Invalid domain name: $domain"
 [[ "$source_host" =~ ^[A-Za-z0-9.-]+$ && "$source_user" =~ ^[A-Za-z_][A-Za-z0-9_-]*$ ]] || die "Invalid source host or user."
 [[ "$source_port" =~ ^[0-9]{1,5}$ ]] && ((10#$source_port > 0 && 10#$source_port < 65536)) || die "Invalid SSH port."
 valid_path "$ssh_key" || die "SSH key path must be absolute and cannot contain '..'."
-for cmd in ssh rsync awk sed grep df stat realpath mktemp cp mv chmod chown tar gzip find date cut head mountpoint; do command -v "$cmd" >/dev/null || die "Required command missing: $cmd"; done
+for cmd in ssh rsync perl awk sed grep df stat realpath mktemp cp mv chmod chown tar gzip find date cut head mountpoint; do command -v "$cmd" >/dev/null || die "Required command missing: $cmd"; done
 db_client=$(command -v mariadb || command -v mysql) || die "MariaDB/MySQL client is required."
 db_dump=$(command -v mariadb-dump || command -v mysqldump) || die "MariaDB/MySQL dump client is required."
 [[ -f "$ssh_key" && -r "$ssh_key" ]] || die "SSH key is missing or unreadable: $ssh_key"
@@ -168,7 +168,28 @@ if [[ "$resume" != true ]] || ! has_step files; then
     echo "Destination backup: $backup"
   fi
   confirm "Transfer WordPress files from $remote:$old_root to $dest_webroot?"
-  rsync -ah --no-inc-recursive --info=flist2,progress2,name0 -e "ssh -p $source_port -i $ssh_key -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$known_hosts" "$remote:$old_root/" "$dest_webroot/" || die "File transfer failed."
+  LC_ALL=C rsync -ah --no-inc-recursive --info=flist2,progress2,name0 -e "ssh -p $source_port -i $ssh_key -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$known_hosts" "$remote:$old_root/" "$dest_webroot/" | perl -e '
+    $| = 1;
+    my $pending = "";
+    while (1) {
+      my $length = sysread(STDIN, my $chunk, 8192);
+      die "Could not read rsync output: $!" unless defined $length;
+      last unless $length;
+      $pending .= $chunk;
+      while ($pending =~ s/\A([^\r\n]*)([\r\n])//) {
+        my ($line, $separator) = ($1, $2);
+        if ($line =~ /^receiving file list /) {
+          print "\nScanning source files...", $separator;
+        } elsif ($line =~ /^([0-9]+) files? to consider$/) {
+          print "File list ready ($1 entries).\n\nTransferring files...\n";
+        } else {
+          print $line, $separator;
+        }
+      }
+    }
+    print $pending;
+  ' || die "File transfer failed."
+  printf '\nFile transfer complete.\n\n'
   chown -R "$(get_record_value 'SFTP username' "$vhost_file"):sftponly" "$dest_webroot"
   find "$dest_webroot" -type d -exec chmod 2775 {} +
   find "$dest_webroot" -type f -exec chmod 0664 {} +
