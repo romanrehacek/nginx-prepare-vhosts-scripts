@@ -168,7 +168,7 @@ if [[ "$resume" != true ]] || ! has_step files; then
     echo "Destination backup: $backup"
   fi
   confirm "Transfer WordPress files from $remote:$old_root to $dest_webroot?"
-  rsync -ah --info=progress2,name0 -e "ssh -p $source_port -i $ssh_key -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$known_hosts" "$remote:$old_root/" "$dest_webroot/" || die "File transfer failed."
+  rsync -ah --no-inc-recursive --info=flist2,progress2,name0 -e "ssh -p $source_port -i $ssh_key -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$known_hosts" "$remote:$old_root/" "$dest_webroot/" || die "File transfer failed."
   chown -R "$(get_record_value 'SFTP username' "$vhost_file"):sftponly" "$dest_webroot"
   find "$dest_webroot" -type d -exec chmod 2775 {} +
   find "$dest_webroot" -type f -exec chmod 0664 {} +
