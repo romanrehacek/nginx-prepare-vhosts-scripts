@@ -169,8 +169,10 @@ if [[ "$resume" != true ]] || ! has_step files; then
   fi
   confirm "Transfer WordPress files from $remote:$old_root to $dest_webroot?"
   LC_ALL=C rsync -ah --no-inc-recursive --info=flist2,progress2,name0 -e "ssh -p $source_port -i $ssh_key -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$known_hosts" "$remote:$old_root/" "$dest_webroot/" | perl -e '
+    use Time::HiRes qw(clock_gettime CLOCK_MONOTONIC);
     $| = 1;
     my $pending = "";
+    my $transfer_started;
     my $total = sprintf("%.2f GB", $ARGV[0] / 1000000000);
     while (1) {
       my $length = sysread(STDIN, my $chunk, 8192);
@@ -182,9 +184,19 @@ if [[ "$resume" != true ]] || ! has_step files; then
         if ($line =~ /^receiving file list /) {
           print "\nScanning source files...", $separator;
         } elsif ($line =~ /^([0-9]+) files? to consider$/) {
+          $transfer_started = clock_gettime(CLOCK_MONOTONIC);
           print "File list ready ($1 entries).\n\nTransferring files...\n";
         } else {
-          $line =~ s/^(\s*[0-9][0-9.,]*[KMGTPE]?)(\s+\d+%)/$1 \/ ~$total$2/;
+          if ($line =~ /^(\s*[0-9][0-9.,]*[KMGTPE]?)(\s+\d+%\s+\S+)(\s+)(\d+:\d{2}:\d{2})(.*)$/) {
+            my ($amount, $rate, $space, $rsync_time, $counts) = ($1, $2, $3, $4, $5);
+            my $now = clock_gettime(CLOCK_MONOTONIC);
+            $transfer_started //= $now;
+            my $seconds = int($now - $transfer_started);
+            my $elapsed = sprintf("%02d:%02d:%02d", int($seconds / 3600), int($seconds / 60) % 60, $seconds % 60);
+            my $eta = $counts =~ /\bto-chk=0\// ? "00:00:00"
+              : $counts =~ /\bxfr#/ ? "--:--:--" : sprintf("%08s", $rsync_time) =~ s/ /0/gr;
+            $line = "$amount / ~$total$rate${space}ETA $eta  Elapsed $elapsed$counts";
+          }
           print $line, $separator;
         }
       }
