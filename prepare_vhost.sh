@@ -81,11 +81,24 @@ db_name=$vhost_name; db_user=$db_name
 nginx_config="$NGINX_CONFIG_DIR/$domain.conf"
 output_file="$VHOSTS_DIR/$domain.txt"
 template_file="$script_dir/template.conf"
+pool_dir="/etc/php/$PHP_FPM_VERSION/fpm/pool.d"
+pool_file="$pool_dir/$domain.conf"
+pool_template="$pool_dir/www.conf"
+pool_socket="/run/php/php${PHP_FPM_VERSION}-fpm-${domain}.sock"
+fpm_binary="php-fpm$PHP_FPM_VERSION"
+fpm_service="php${PHP_FPM_VERSION}-fpm"
 
 # Refuse every detectable collision before creating any resource. Base storage must be mounted.
 check_vhost_mount "$VHOSTS_BASE_DIR" || exit 1
 [[ -d "$NGINX_CONFIG_DIR" ]] || { echo "Nginx config directory does not exist: $NGINX_CONFIG_DIR" >&2; exit 1; }
 [[ -f "$template_file" ]] || { echo "Missing template: $template_file" >&2; exit 1; }
+[[ -f "$pool_template" && ! -L "$pool_template" ]] || { echo "Missing or unsafe PHP-FPM pool template: $pool_template" >&2; exit 1; }
+[[ ! -e "$pool_file" && ! -L "$pool_file" && ! -e "$pool_socket" && ! -L "$pool_socket" ]] || { echo "Refusing existing PHP-FPM pool or socket for $domain" >&2; exit 1; }
+(( ${#pool_socket} <= 107 )) || { echo "PHP-FPM socket path is too long for a Unix socket: $pool_socket" >&2; exit 1; }
+command -v "$fpm_binary" >/dev/null || { echo "Missing PHP-FPM binary: $fpm_binary" >&2; exit 1; }
+systemctl is-active --quiet "$fpm_service" || { echo "PHP-FPM service is not active: $fpm_service" >&2; exit 1; }
+"$fpm_binary" -t || { echo "Existing PHP-FPM configuration is invalid" >&2; exit 1; }
+awk '/^[[:space:]]*\[/ { n++; if ($0 !~ /^[[:space:]]*\[www\][[:space:]]*([;#].*)?$/) bad=1 } /^[[:space:]]*include[[:space:]]*=/ { bad=1 } END { exit !(n==1 && !bad) }' "$pool_template" || { echo "Cannot safely copy www pool: expected one [www] section and no include directives" >&2; exit 1; }
 if [[ -e "$VHOSTS_DIR" || -L "$VHOSTS_DIR" ]]; then
   [[ -d "$VHOSTS_DIR" && ! -L "$VHOSTS_DIR" && "$(stat -c '%u' "$VHOSTS_DIR")" == 0 ]] || { echo "Refusing unsafe credentials directory: $VHOSTS_DIR" >&2; exit 1; }
 fi
@@ -124,14 +137,16 @@ fi
 mkdir -p "$VHOSTS_DIR" || { echo "Could not create credentials directory: $VHOSTS_DIR" >&2; exit 1; }
 chmod 700 "$VHOSTS_DIR" || { echo "Could not secure credentials directory: $VHOSTS_DIR" >&2; exit 1; }
 
-user_created=false group_created=false private_group_created=false webroot_created=false db_created=false db_user_created=false config_created=false www_group_added=false credentials_created=false
-tmp_config= tmp_credentials=
+user_created=false group_created=false private_group_created=false webroot_created=false db_created=false db_user_created=false config_created=false www_group_added=false credentials_created=false pool_created=false
+tmp_config= tmp_credentials= tmp_pool=
 vhost_pass=$(openssl rand -base64 12); db_pass=$(openssl rand -base64 12)
 rollback() {
   trap - ERR
   set +e
   echo "Provisioning failed; cleaning resources created by this invocation." >&2
   [[ "$config_created" == true ]] && rm -f -- "$nginx_config"
+  [[ "$pool_created" == true ]] && rm -f -- "$pool_file"
+  [[ -n "$tmp_pool" ]] && rm -f -- "$tmp_pool"
   [[ -n "$tmp_config" ]] && rm -f -- "$tmp_config"
   [[ -n "$tmp_credentials" ]] && rm -f -- "$tmp_credentials"
   if [[ "$db_user_created" == true ]]; then mysql -e "DROP USER '$db_user'@'localhost';"; fi
@@ -153,6 +168,7 @@ rollback() {
   [[ "$private_group_created" == true ]] && groupdel "$vhost_name" 2>/dev/null
   [[ "$group_created" == true ]] && groupdel sftponly 2>/dev/null
   nginx -t >/dev/null 2>&1 && systemctl reload nginx >/dev/null 2>&1
+  if [[ "$pool_created" == true ]]; then "$fpm_binary" -t >/dev/null 2>&1 && systemctl reload "$fpm_service" >/dev/null 2>&1; fi
   exit 1
 }
 trap rollback ERR
@@ -181,13 +197,32 @@ mysql -e "CREATE USER '$db_user'@'localhost' IDENTIFIED BY '$db_pass';" || fail 
 db_user_created=true
 mysql -e "GRANT ALL PRIVILEGES ON \`$db_name\`.* TO '$db_user'@'localhost'; FLUSH PRIVILEGES;" || fail "Failed to grant database privileges"
 
+tmp_pool=$(mktemp "$pool_dir/.vhost-pool.XXXXXX") || fail "Could not create temporary pool config"
+awk -v domain="$domain" -v socket="$pool_socket" '
+  /^[[:space:]]*\[www\]/ { print "; Managed vhost pool: " domain; print "[" domain "]"; next }
+  /^[[:space:]]*(listen|pm|pm\.max_children|pm\.process_idle_timeout)[[:space:]]*=/ { next }
+  { print }
+  END { print "listen = " socket; print "pm = ondemand"; print "pm.max_children = 2"; print "pm.process_idle_timeout = 10s" }
+' "$pool_template" > "$tmp_pool" || fail "Could not render PHP-FPM pool"
+chmod 644 "$tmp_pool" || fail "Could not set PHP-FPM pool permissions"
+ln -- "$tmp_pool" "$pool_file" || fail "Could not atomically install PHP-FPM pool"
+pool_created=true
+rm -f -- "$tmp_pool"; tmp_pool=
+"$fpm_binary" -t || fail "PHP-FPM configuration test failed"
+systemctl reload "$fpm_service" || fail "PHP-FPM reload failed"
+for ((attempt = 0; attempt < 50; attempt++)); do
+  [[ -S "$pool_socket" ]] && break
+  sleep 0.2
+done
+[[ -S "$pool_socket" ]] || fail "PHP-FPM socket was not created: $pool_socket"
 tmp_config=$(mktemp "$NGINX_CONFIG_DIR/.${vhost_name}.XXXXXX")
-sed -e "s|__DOMAIN__|$domain|g" -e "s|__VHOST_NAME__|$vhost_name|g" -e "s|__WWW_DOMAIN__|$www_server_name|g" -e "s|__VHOSTS_BASE_DIR__|$VHOSTS_BASE_DIR|g" -e "s|__PHP_FPM_VERSION__|$PHP_FPM_VERSION|g" "$template_file" > "$tmp_config" || fail "Failed to render Nginx config"
+sed -e "s|__DOMAIN__|$domain|g" -e "s|__VHOST_NAME__|$vhost_name|g" -e "s|__WWW_DOMAIN__|$www_server_name|g" -e "s|__VHOSTS_BASE_DIR__|$VHOSTS_BASE_DIR|g" -e "s|__PHP_FPM_SOCKET__|$pool_socket|g" "$template_file" > "$tmp_config" || fail "Failed to render Nginx config"
 ln -- "$tmp_config" "$nginx_config" || fail "Could not atomically install Nginx config"
 config_created=true
 rm -f -- "$tmp_config"
 tmp_config=
 nginx -t || fail "Nginx configuration test failed"
+systemctl reload nginx || fail "Nginx reload failed"
 tmp_credentials=$(mktemp "$VHOSTS_DIR/.${vhost_name}.XXXXXX")
 cat > "$tmp_credentials" <<EOF
 VHOST: $domain

@@ -55,6 +55,7 @@ VHOSTS_DIR=/root/vhosts
 ARCHIVE_DIR=$VHOSTS_DIR/archive
 webroot="$mapped_base/$domain"
 nginx_config="$NGINX_CONFIG_DIR/$domain.conf"
+pool_config= pool_socket= pool_version= pool_remove=false
 credentials_file="$VHOSTS_DIR/$domain.txt"
 archive_timestamp=$(date '+%Y%m%d_%H%M%S')
 archive_file="$ARCHIVE_DIR/${domain}_${archive_timestamp}.txt"
@@ -76,6 +77,22 @@ fi
 if [[ -e "$nginx_config" || -L "$nginx_config" ]]; then
   [[ -f "$nginx_config" && ! -L "$nginx_config" ]] || { echo "Refusing non-regular Nginx config: $nginx_config" >&2; exit 1; }
   grep -Fqx "    # vhost-owner: domain=$domain identifier=$vhost_name" "$nginx_config" || { echo "Nginx ownership marker does not match $domain/$vhost_name; refusing removal." >&2; exit 1; }
+fi
+pool_candidates=(/etc/php/*/fpm/pool.d/"$domain.conf")
+for candidate in "${pool_candidates[@]}"; do
+  [[ -e "$candidate" || -L "$candidate" ]] || continue
+  [[ -z "$pool_config" ]] || { echo "Multiple PHP-FPM pool configs found for $domain; refusing removal." >&2; exit 1; }
+  pool_config=$candidate
+done
+if [[ -n "$pool_config" ]]; then
+  pool_version=${pool_config#/etc/php/}; pool_version=${pool_version%%/*}
+  pool_socket="/run/php/php${pool_version}-fpm-${domain}.sock"
+  [[ -f "$pool_config" && ! -L "$pool_config" && "$(stat -c '%u:%a' "$pool_config")" == 0:644 ]] || { echo "Refusing unsafe PHP-FPM pool config: $pool_config" >&2; exit 1; }
+  grep -Fqx "; Managed vhost pool: $domain" "$pool_config" || { echo "Pool ownership marker missing; refusing removal." >&2; exit 1; }
+  grep -Fqx "[$domain]" "$pool_config" || { echo "Pool name mismatch; refusing removal." >&2; exit 1; }
+  grep -Fqx "listen = $pool_socket" "$pool_config" || { echo "Pool socket mismatch; refusing removal." >&2; exit 1; }
+  [[ -f "$nginx_config" ]] && grep -Fq "fastcgi_pass unix:$pool_socket;" "$nginx_config" || { echo "Nginx config does not reference the mapped pool socket; refusing removal." >&2; exit 1; }
+  pool_remove=true
 fi
 private_group_removable=false account_primary_gid=
 if id "$vhost_name" >/dev/null 2>&1; then
@@ -107,6 +124,7 @@ mysql -N -B -e "SELECT COUNT(*) FROM information_schema.SCHEMATA WHERE SCHEMA_NA
 mysql -N -B -e "SELECT COUNT(*) FROM mysql.user WHERE User='$db_name' AND Host='localhost';" >/dev/null || { echo "Cannot inspect MySQL user state." >&2; exit 1; }
 for cmd in mkdir chmod mv rm userdel; do command -v "$cmd" >/dev/null || { echo "Required command missing: $cmd" >&2; exit 1; }; done
 if [[ -f "$nginx_config" ]]; then command -v nginx >/dev/null && command -v systemctl >/dev/null || { echo "Nginx and systemctl are required to safely remove this config." >&2; exit 1; }; fi
+if [[ "$pool_remove" == true ]]; then command -v "php-fpm$pool_version" >/dev/null && command -v systemctl >/dev/null || { echo "PHP-FPM and systemctl are required to remove this pool." >&2; exit 1; }; fi
 if [[ "$private_group_removable" == true ]]; then command -v groupdel >/dev/null || { echo "groupdel is required to remove the mapped private group." >&2; exit 1; }; fi
 
 cat <<EOF
@@ -115,6 +133,7 @@ About to remove provisioned vhost:
   System account: $vhost_name
   Webroot: $webroot (including all content)
   Nginx config: $nginx_config
+  Dedicated PHP-FPM pool: $([[ "$pool_remove" == true ]] && echo "$domain ($pool_socket)" || echo "none")
   Database/user: $db_name
   Certificate lineage: $cert_name
   SSL created by this script: $ssl_created
@@ -131,15 +150,43 @@ done
 # Mutations start only after explicit confirmation and all preflight checks.
 mkdir -p "$ARCHIVE_DIR"
 chmod 700 "$VHOSTS_DIR" "$ARCHIVE_DIR"
+if [[ -f "$nginx_config" ]]; then
+  config_backup=$(mktemp "$ARCHIVE_DIR/$domain.nginx.XXXXXX")
+  cp -a -- "$nginx_config" "$config_backup"
+  if [[ "$pool_remove" == true ]]; then
+    pool_backup=$(mktemp "$ARCHIVE_DIR/$domain.pool.XXXXXX")
+    cp -a -- "$pool_config" "$pool_backup"
+  fi
+  restore_nginx() {
+    cp -a -- "$config_backup" "$nginx_config" && nginx -t && systemctl reload nginx
+  }
+  rm -- "$nginx_config"
+  if [[ "$pool_remove" == true ]]; then
+    if ! effective_nginx=$(nginx -T 2>&1) || [[ "$effective_nginx" == *"/php${pool_version}-fpm-${domain}.sock"* ]]; then
+      restore_nginx || echo "Restore Nginx from $config_backup" >&2
+      echo "Could not verify that the PHP-FPM socket is unused; removal stopped." >&2
+      exit 1
+    fi
+  fi
+  if ! nginx -t || ! systemctl reload nginx; then
+    restore_nginx || echo "Restore Nginx from $config_backup" >&2
+    exit 1
+  fi
+  if [[ "$pool_remove" == true ]]; then
+    if ! rm -- "$pool_config" || ! "php-fpm$pool_version" -t || ! systemctl reload "php${pool_version}-fpm"; then
+      if cp -a -- "$pool_backup" "$pool_config" && "php-fpm$pool_version" -t && systemctl reload "php${pool_version}-fpm"; then
+        restore_nginx || echo "Restore Nginx from $config_backup" >&2
+      else
+        echo "Restore PHP-FPM from $pool_backup, then Nginx from $config_backup" >&2
+      fi
+      exit 1
+    fi
+  fi
+fi
 if [[ -f "$credentials_file" ]]; then
   { printf '\nREMOVED: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')"; } >> "$credentials_file"
   mv -- "$credentials_file" "$archive_file"
   chmod 600 "$archive_file"
-fi
-if [[ -f "$nginx_config" ]]; then
-  rm -- "$nginx_config"
-  nginx -t || { echo "Nginx config test failed after removing $nginx_config; mapping retained for recovery." >&2; exit 1; }
-  systemctl reload nginx || { echo "Nginx reload failed; mapping retained for recovery." >&2; exit 1; }
 fi
 if [[ "$ssl_created" == true && ( -d "/etc/letsencrypt/live/$cert_name" || -d "/etc/letsencrypt/archive/$cert_name" ) ]]; then
   certbot delete --cert-name "$cert_name" --non-interactive || { echo "Certificate removal failed; remaining resources and mapping are preserved for safe recovery." >&2; exit 1; }
