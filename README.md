@@ -46,7 +46,39 @@ The base directory is the parent of each domain directory. With the example abov
 
 Use only the documented `KEY=VALUE` lines. Values must not be quoted and must not contain spaces or inline comments. The loader validates the values and treats the file as data; it never evaluates shell commands. Unknown or malformed settings make the scripts stop before changing the server. `.env` is ignored by Git; commit `.env.example`, never the local `.env`. Do not store passwords or other secrets in it.
 
-The PHP-FPM setting controls the socket rendered into each new Nginx config, for example `/var/run/php/php8.3-fpm.sock`. The Nginx config directory remains `/etc/nginx/conf.d`.
+The PHP-FPM setting selects the installed FPM version. New vhosts get a domain-named pool in `/etc/php/<version>/fpm/pool.d/` and a socket at `/run/php/php<version>-fpm-<domain>.sock`. The Nginx config directory remains `/etc/nginx/conf.d`. The existing `www.conf` is used as a template, retaining its pool settings except the pool name, listen address and process manager limits. The new pool uses `ondemand`, `pm.max_children = 2` and `pm.process_idle_timeout = 10s`. The script checks both configurations, reloads PHP-FPM and Nginx, and removes the newly created pool on provisioning failure. Long domains whose Unix socket path exceeds 107 bytes are rejected.
+
+Each pool has its own child limit: two children per pool is not a server-wide limit. Monitor available RAM, swap and FPM logs; increase server memory or reduce pool limits when concurrency warrants it. `ondemand` workers appear only after requests and exit after the idle timeout.
+
+Vhost removal handles pools marked as managed by `prepare_vhost.sh`. Review manually created pools separately before removing them. Keep any pool used by another vhost.
+
+### Moving an existing vhost to a separate PHP-FPM pool
+
+Perform this for one domain at a time. The example applies to Debian's PHP 8.4 configuration shown in the server inventory; inspect `www.conf` and any included files first. Keep the shared `www` pool active. Backups below are outside the PHP-FPM pool directory and are not loaded by either service. Replace the domain only after verifying its Nginx config contains exactly the shared socket shown below.
+
+```bash
+DOMAIN=beta.smartmap.sjbdigital.dev
+POOL="/etc/php/8.4/fpm/pool.d/$DOMAIN.conf"
+NGINX="/etc/nginx/conf.d/$DOMAIN.conf"
+SOCKET="/run/php/php8.4-fpm-$DOMAIN.sock"
+BACKUP="/root/vhost-pool-backups/$(date +%Y%m%d-%H%M%S)-$DOMAIN"
+sudo mkdir -p "$BACKUP"
+sudo cp -a /etc/php/8.4/fpm/pool.d/www.conf "$BACKUP/www.conf"
+sudo cp -a "$NGINX" "$BACKUP/nginx.conf"
+sudo grep -n 'fastcgi_pass' "$NGINX"
+sudo test ! -e "$POOL" && sudo test ! -L "$POOL" || { echo 'Pool already exists; stop and inspect'; return 1 2>/dev/null || exit 1; }
+```
+
+Using the backed-up `www.conf`, create a pool with the same active user, group, socket ownership and PHP settings; change `[www]` to the domain, `listen` to the new socket, and set `pm = ondemand`, `pm.max_children = 2` and `pm.process_idle_timeout = 10s`. Keep comments and other directives. Ensure no `include` or custom directive refers specifically to `[www]`; resolve those manually. Install the pool as a root-owned file with mode 0644. Then validate and reload PHP-FPM and confirm the socket exists:
+
+```bash
+sudo php-fpm8.4 -t && sudo systemctl reload php8.4-fpm
+sudo ls -l "$SOCKET"
+```
+
+Only after the new socket exists, update the one `fastcgi_pass` in that domain's Nginx file from `/var/run/php/php8.4-fpm.sock` to `$SOCKET`, retaining all other lines. Run `sudo nginx -t` and, if successful, `sudo systemctl reload nginx`. Request the site's PHP page and check for a 502, PHP-FPM/Nginx logs and `htop`. A worker appears only while requests reach the pool. Repeat for the other domains after confirming each one works.
+
+For rollback, restore `$BACKUP/nginx.conf` to `$NGINX`, run `sudo nginx -t` and reload Nginx; only then remove the domain pool, test PHP-FPM and reload it. Keep the backups until all sites have been checked. Leave `www` enabled until all effective Nginx configurations and any other FastCGI clients have been verified not to use its socket.
 
 ## Install and prepare a vhost
 
@@ -127,6 +159,16 @@ VHOSTS_BASE_DIR/<domain>/
 For the defaults, this is `/var/www/<domain>/`. The public webroot is `public_html/`.
 
 ## WordPress migration
+
+### Select a site from the old server
+
+On the destination server, run the interactive menu from the project directory:
+
+```bash
+sudo ./migrate_vhost_menu.sh
+```
+
+The menu lists WordPress sites under the source server's standard domains directory and compares them with local vhosts and migration state. Pick one numbered entry at a time. New vhosts request HTTPS using the existing provisioning script, so point the selected hostname to the destination and make it reachable for Certbot first. The menu then runs the migration script. A completed migration disappears from the next menu. Review existing targets and interrupted runs before continuing, especially if files or database tables already exist.
 
 `migrate_vhost.sh` copies a beta/development WordPress site to the new server. It uses the existing source SSH key and trusted `known_hosts`; install/verify the source host key through your normal process first. It never disables host-key checking. Run it from this directory:
 
